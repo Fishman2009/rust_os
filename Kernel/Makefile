@@ -28,16 +28,16 @@ endif
 
 fn_getdeps = $(shell cat $1 | sed -nr 's/.*extern crate ([a-zA-Z_0-9]+);/\1/p' | tr '\n' ' ')
 fn_moddeps = $(filter-out core kernel,$(call fn_getdeps,Modules/$1/lib.rs))
-define uniq =
-  $(eval seen :=)
-  $(foreach _,$1,$(if $(filter $_,${seen}),,$(eval seen += $_)))
-  ${seen}
-endef
+uniq = $(eval seen :=) $(foreach _,$1,$(if $(filter $_,${seen}),,$(eval seen += $_))) ${seen}
 
 OBJS := start.ao $(MODS:%=%.o) libkernel.rlib libcore.rlib
 EOBJS := $(foreach m,$(MODS), $(addsuffix .o,$(call fn_moddeps,$m)) )
 OBJS += $(EOBJS)
+$(warning $(OBJS))
 OBJS := $(shell echo $(call uniq, $(OBJS)))
+ifeq ($(OBJS),)
+	$(error BUGCHECK - Objects list empty)
+endif
 
 PREFIX ?= ../.prefix/
 rustcmd = LD_LIBRARY_PATH=$(PREFIX)lib/ $(PREFIX)bin/$1
@@ -144,7 +144,7 @@ UPDATE_rustc:
 	@mkdir -p ../.prefix
 	curl -s https://static.rust-lang.org/rustup.sh | sh -s -- --channel=nightly --prefix=../.prefix --disable-sudo --disable-ldconfig --yes
 UPDATE_libcore_src:
-	cd .. && wget https://static.rust-lang.org/dist/rustc-nightly-src.tar.gz -N -nv
+	cd .. && wget http://static.rust-lang.org/dist/rustc-nightly-src.tar.gz -N -nv
 
 #../.prefix/bin/rustc: UPDATE_rustc
 #	@#
@@ -169,9 +169,9 @@ $(OBJDIR)kernel.ir: Core/main.rs $(OBJDIR)libcore.rlib $(TARGET_FILE)
 # Complilation
 # ===
 bin/kernel-$(ARCH).bin: $(OBJS) Core/arch/$(ARCH)/link.ld Makefile
-	@mkdir -p bin/
+	@mkdir -p bin/ $(OBJDIR)
 	@echo [LD] -o $@
-	$V$(TRIPLE)-ld -o $@ $(OBJS) $(LIBS) $(LINKFLAGS)
+	$V$(LD) -o $@ $(OBJS) $(LIBS) $(LINKFLAGS)
 ifeq ($(ARCH),amd64)
 	@objcopy $@ --only-keep-debug $@.debug
 	@objcopy $@ -F elf32-i386 $@.elf32
@@ -183,7 +183,7 @@ endif
 
 %.dsm: %
 	@echo "[OBJDUMP] >" $*.dsm
-	$V$(TRIPLE)-objdump -s -C -S $* > $*.dsm
+	$V$(OBJDUMP) -s -C -S $* > $*.dsm
 
 # Assembly
 $(OBJDIR)%.ao: Core/arch/$(ARCH)/%.asm
@@ -213,6 +213,7 @@ $(OBJDIR)libcore.rlib: $(LIBCORESRC)lib.rs $(TARGET_FILE)
 	@cp $(OBJDIR)core.d $(OBJDIR)libcore.d
 
 $(OBJDIR)acpica.a: ../acpica/Makefile $(wildcard ../acpica/patches/source/include/platform/*)
+	make -C ../acpica TRIPLE=$(TRIPLE) ARCH=$(ARCH) srcdir
 	make -C ../acpica TRIPLE=$(TRIPLE) ARCH=$(ARCH)
 	cp ../acpica/acpica-$(TRIPLE).a $@
 

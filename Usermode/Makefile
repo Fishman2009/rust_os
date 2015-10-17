@@ -7,7 +7,7 @@ V ?= @
 
 # List of root-level applications to build
 APPS := loader init login
-APPS += simple_console
+APPS += simple_console shell
 
 # Build directories
 # - Distribution output root
@@ -31,6 +31,7 @@ RUSTFLAGS += -O
 RUSTFLAGS += -g
 RUSTFLAGS += --cfg disable_float
 RUSTFLAGS += -Z force-overflow-checks=yes
+#RUSTFLAGS += -C lto
 # - This feels bad, sure it's valid, but...
 ifeq ($(ARCH),armv7)
   RUSTFLAGS += -C relocation-model=static
@@ -73,8 +74,8 @@ $(BINDIR)loader: loader/link.ld $(OBJDIR)loader/start.ao $(OBJDIR)loader/src/mai
 	@echo [LD] $@
 	@$(LD) -r --gc-sections --undefined image_header --entry start -o $(OBJDIR)loader.o $(OBJDIR)loader/start.ao $(OBJDIR)loader/src/main.o $(LOADER_DEPS)
 	@$(LD) -o $(OBJDIR)loader.elf -T loader/link.ld $(OBJDIR)loader.o -Map $(OBJDIR)loader_map.txt
-	@$(TRIPLE)-objcopy $(OBJDIR)loader.elf -O binary $@
-	@$(TRIPLE)-objdump -CS $(OBJDIR)loader.elf > $(OBJDIR)loader.dsm
+	@$(OBJCOPY) $(OBJDIR)loader.elf -O binary $@
+	@$(OBJDUMP) -CS $(OBJDIR)loader.elf > $(OBJDIR)loader.dsm
 $(OBJDIR)loader/src/main.o: $(LOADER_DEPS)
 
 # Low-level loader dummy dynamic library
@@ -88,7 +89,7 @@ $(LIBDIR)libloader_dyn.so: loader/lib.S	$(makefile_deps)
 # Libraries are compiled into OBJDIR to get dependencies, but are actually stored in LIBDIR
 $(LIBDIR)lib%.rlib: $(OBJDIR)lib%.rlib
 	@mkdir -p $(dir $@)
-	@mv $< $@
+	@cp $< $@
 # libcore: Same code as used by the kernel, but different build
 $(OBJDIR)libcore.rlib: ../rustc_src/libcore/lib.rs $(TARGET_SPEC) $(makefile_deps)
 	@mkdir -p $(dir $@)
@@ -125,7 +126,7 @@ $(OBJDIR)lib%.rlib: lib%/lib.rs $(TARGET_SPEC) $(makefile_deps)
 	@mv $(OBJDIR)$*.d $(OBJDIR)lib$*.d
 
 # - Official libraries
-$(OBJDIR)lib%.rlib: ../rustc_src/lib%/lib.rs $(TARGET_SPEC) $(makefile_deps)
+$(OBJDIR)lib%.rlib: ../rustc_src/lib%/lib.rs $(OBJDIR)libcore.rlib $(TARGET_SPEC) $(makefile_deps)
 	@mkdir -p $(dir $@)
 	@echo [RUSTC rust-src] $@
 	$VCFG_COMPILER_HOST_TRIPLE=x86_64-unknown-linux-gnu $(RUSTC) $(RUSTFLAGS) -A unused_unsafe -A unused_features --emit=link,dep-info --out-dir $(OBJDIR) $< --crate-type=rlib --crate-name=$*
@@ -193,5 +194,5 @@ $(eval $(call fn_rustdeps, collections, rustc_unicode alloc))
 
 
 
-%.rs:
-	
+#%.rs:
+#	

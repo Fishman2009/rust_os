@@ -12,6 +12,10 @@ extern crate syscalls;
 
 extern crate tifflin_process;
 
+macro_rules! imgpath {
+		($p:expr) => {concat!("/system/Tifflin/shared/images/",$p)};
+}
+
 fn main()
 {
 	const MENU_BTN_WIDTH: u32 = 16;
@@ -19,27 +23,21 @@ fn main()
 	const ENTRY_FRAME_HEIGHT: u32 = 40;
 	const TEXTBOX_HEIGHT: u32 = 16;
 
-	// Obtain window group from parent
-	{
-		use syscalls::Object;
-		use syscalls::threads::{S_THIS_PROCESS,ThisProcessWaits};
-		::syscalls::threads::wait(&mut [S_THIS_PROCESS.get_wait(ThisProcessWaits::new().recv_obj())], !0);
-		::syscalls::gui::set_group( S_THIS_PROCESS.receive_object::<::syscalls::gui::Group>(0).unwrap() );
-	}
+	::wtk::initialise();
 
 	// Menu bar
 	// - Two buttons: Options and power
-	// TODO: At the moment, the image widget does nothing. Need to decide where images live, and what format.
-	let options_icon = ::wtk::Colour::theme_text_bg();	//::wtk::image::RasterMonoA::new("/Tifflin/shared/images/options.r32");
-	let power_icon   = ::wtk::Colour::theme_text_bg();	//::wtk::image::RasterMonoA::new("/Tifflin/shared/images/power.r32");
+	let options_icon = ::wtk::image::RasterMonoA::new(imgpath!("options.r8"), ::wtk::Colour::theme_text_bg()).unwrap();
+	let power_icon   = ::wtk::image::RasterMonoA::new(imgpath!("power.r8"  ), ::wtk::Colour::theme_text_bg()).unwrap();
 	let mut options_button = ::wtk::Button::new( ::wtk::Image::new(options_icon) );
 	options_button.bind_click( |_btn,_win| () );
 	let mut power_button = ::wtk::Button::new( ::wtk::Image::new(power_icon) );
 	power_button.bind_click( |_btn,_win| () );
-	let mut menubar = ::wtk::Box::new_horiz();
-	menubar.add(&options_button, Some(MENU_BTN_WIDTH));
-	menubar.add_fill(None);
-	menubar.add(&power_button, Some(MENU_BTN_WIDTH));
+	let menubar = ::wtk::StaticBox::new_horiz( (
+		::wtk::BoxEle::fixed(MENU_BTN_WIDTH, options_button),
+		::wtk::BoxEle::expand( () ),
+		::wtk::BoxEle::fixed(MENU_BTN_WIDTH, power_button),
+		));
 
 	// Login box (vertially stacked, centered)
 	let mut username = ::wtk::TextInput::new();
@@ -67,34 +65,29 @@ fn main()
 		//win.show();
 		});
 
-	/*
-	let loginbox = ::wtk::Frame::new( ::wtk::Box::new_virt(
-		( (), None ),
-		( &username, Some(TEXTBOX_HEIGHT) ),
-		( &password, Some(TEXTBOX_HEIGHT) ),
-		( (), None ),
-		) );
-	loginbox.items.1.ele.bind_submit();
-	 */
-	let mut loginbox = ::wtk::Frame::new( ::wtk::Box::new_vert() );
-	loginbox.inner_mut().add_fill(None);
-	loginbox.inner_mut().add(&username, Some(TEXTBOX_HEIGHT));
-	loginbox.inner_mut().add(&password, Some(TEXTBOX_HEIGHT));
-	loginbox.inner_mut().add_fill(None);
+	let loginbox = ::wtk::Frame::new_fat( ::wtk::StaticBox::new_vert((
+		::wtk::BoxEle::expand( () ),
+		::wtk::BoxEle::fixed( TEXTBOX_HEIGHT, &username ),
+		::wtk::BoxEle::fixed( 1, () ),	// <-- Padding
+		::wtk::BoxEle::fixed( TEXTBOX_HEIGHT, &password ),
+		::wtk::BoxEle::expand( () ),
+		)) );
 
-	let mut hbox = ::wtk::Box::new_horiz();
-	hbox.add_fill(None);
-	hbox.add(&loginbox, Some(80));
-	hbox.add_fill(None);
+	let hbox = ::wtk::StaticBox::new_horiz((
+		::wtk::BoxEle::expand( () ),
+		::wtk::BoxEle::fixed(120, &loginbox),
+		::wtk::BoxEle::expand( () ),
+		));
 
-	let mut vbox = ::wtk::Box::new_vert();
-	vbox.add(&menubar, Some(MENU_HEIGHT));
-	vbox.add_fill(None);
-	vbox.add(&hbox, Some(ENTRY_FRAME_HEIGHT));
-	vbox.add_fill(None);
-	vbox.add_fill(Some(MENU_HEIGHT));
+	let vbox = ::wtk::StaticBox::new_vert((
+		::wtk::BoxEle::fixed( MENU_HEIGHT, &menubar),
+		::wtk::BoxEle::expand( () ),
+		::wtk::BoxEle::fixed(ENTRY_FRAME_HEIGHT, &hbox),
+		::wtk::BoxEle::expand( () ),
+		::wtk::BoxEle::fixed( MENU_HEIGHT, () ),
+		));
 
-	let mut win = ::wtk::Window::new(&vbox);
+	let mut win = ::wtk::Window::new("Login", &vbox, ::wtk::Colour::theme_body_bg());
 	win.undecorate();
 	win.maximise();
 
@@ -117,7 +110,8 @@ fn try_login(username: &str, password: &str) -> Result<(), &'static str>
 	if username == "root" && password == "password"
 	{
 		// Spawn console, and wait for it to terminate
-		spawn_console_and_wait("/sysroot/bin/simple_console");
+		//spawn_console_and_wait("/sysroot/bin/simple_console");
+		spawn_console_and_wait("/sysroot/bin/shell");
 		Ok( () )
 	}
 	else
@@ -130,6 +124,7 @@ fn spawn_console_and_wait(path: &str)
 {
 	// TODO: I need something more elegant than this.
 	// - Needs to automatically pass the WGH
+	// - OR - Just have a wtk method to pass it `::wtk::share_handle(&console)`
 	let console = tifflin_process::Process::spawn(path);
 	console.send_obj( ::syscalls::gui::clone_group_handle() );
 	::syscalls::threads::wait(&mut [console.wait_terminate()], !0);

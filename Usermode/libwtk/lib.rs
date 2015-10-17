@@ -21,6 +21,7 @@ mod window;
 mod layout;
 mod static_layout;
 mod input;
+mod text;
 
 pub mod image;
 
@@ -64,3 +65,15 @@ pub use input::text_box::TextInput;
 pub use input::button::Button;
 pub use image::Image;
 
+pub use static_layout::Box as StaticBox;
+pub use static_layout::BoxEle;
+
+pub use text::Label;
+
+pub fn initialise()
+{
+	use syscalls::Object;
+	use syscalls::threads::{S_THIS_PROCESS,ThisProcessWaits};
+	::syscalls::threads::wait(&mut [S_THIS_PROCESS.get_wait(ThisProcessWaits::new().recv_obj())], !0);
+	::syscalls::gui::set_group( S_THIS_PROCESS.receive_object::<::syscalls::gui::Group>(0).unwrap() );
+}
