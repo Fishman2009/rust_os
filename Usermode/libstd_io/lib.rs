@@ -1,9 +1,7 @@
 // Tifflin OS Usermode
 // - By John Hodge (thePowersGang)
 //
-// libstd_io
-#![feature(no_std)]
-#![feature(core_slice_ext,core_str_ext)]
+//! libstd's IO support
 #![no_std]
 use core::fmt;
 
@@ -11,12 +9,18 @@ use core::fmt;
 extern crate macros;
 extern crate syscalls;
 
+extern crate alloc;
+
 pub mod prelude {
 	pub use super::{Read, Write, BufRead, Seek};
 }
 mod std {
-	pub use core::{fmt, convert};
+	pub use core::convert;
 }
+
+mod buf_reader;
+
+pub use buf_reader::BufReader;
 
 /// Shorthand result type
 pub type Result<T> = ::core::result::Result<T,Error>;
@@ -27,20 +31,61 @@ pub struct Error(ErrorInner);
 #[derive(Debug)]
 enum ErrorInner
 {
-	Misc,
-	Interrupted,
+	Misc(::alloc::string::String),
+	IncompleteIo,
+	//Interrupted,
 	VFS(::syscalls::vfs::Error),
+	Net(::syscalls::net::Error),
+}
+impl Error {
+	pub fn new_misc(v: ::alloc::string::String) -> Self {
+		Error(ErrorInner::Misc(v))
+	}
+}
+impl ::core::fmt::Display for Error {
+	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+		use ::syscalls::vfs::Error as Vfs;
+		use ::syscalls::net::Error as Net;
+		match self.0 {
+		ErrorInner::Misc(ref s) => {
+			f.write_str("Unknown/misc error: ")?;
+			f.write_str(s)
+		},
+		ErrorInner::IncompleteIo => f.write_str("Unexpected end of file"),
+		ErrorInner::VFS(Vfs::FileNotFound) => f.write_str("File not found"),
+		ErrorInner::VFS(Vfs::TypeError   ) => f.write_str("Incorrect file type for operation"),
+		ErrorInner::VFS(Vfs::PermissionDenied) => f.write_str("Permission denied"),
+		ErrorInner::VFS(Vfs::FileLocked) => f.write_str("File is locked"),
+		ErrorInner::VFS(Vfs::MalformedPath) => f.write_str("Malformed path"),
+		//ErrorInner::VFS(ref e) => write!(f, "Unknown VFS error {:?}", e),
+		ErrorInner::Net(Net::AlreadyInUse) => f.write_str("Address already in use"),
+		ErrorInner::Net(Net::InvalidValue) => f.write_str("Invalid parameter value"),
+		ErrorInner::Net(Net::NoData) => f.write_str("No data available"),
+		ErrorInner::Net(Net::NoRoute) => f.write_str("No route to host"),
+		ErrorInner::Net(Net::SocketClosed) => f.write_str("Socket closed"),
+		ErrorInner::Net(Net::ConnectionReset) => f.write_str("Connection reset"),
+		ErrorInner::Net(Net::Timeout) => f.write_str("Connection timed out"),
+		}
+	}
 }
 
 impl_conv! {
 	From<::syscalls::vfs::Error>(v) for Error {
 		Error( ErrorInner::VFS(v) )
 	}
+	From<::syscalls::net::Error>(v) for Error {
+		Error( ErrorInner::Net(v) )
+	}
 }
 
 pub trait Read
 {
 	fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+}
+impl<'a, T: 'a + Read> Read for &'a mut T {
+	fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+		(**self).read(buf)
+	}
 }
 pub trait BufRead: Read
 {
@@ -53,7 +98,7 @@ pub trait Write
 	fn write_all(&mut self, mut buf: &[u8]) -> Result<()> {
 		while !buf.is_empty() {
 			match self.write(buf) {
-			Ok(0) => return Err(Error(ErrorInner::Misc)/*::new(ErrorKind::WriteZero, "failed to write whole buffer")*/),
+			Ok(0) => return Err(Error(ErrorInner::IncompleteIo)/*::new(ErrorKind::WriteZero, "failed to write whole buffer")*/),
 			Ok(n) => buf = &buf[n..],
 			//Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
 			Err(e) => return Err(e),
@@ -100,6 +145,11 @@ pub enum SeekFrom
 pub trait Seek
 {
 	fn seek(&mut self, pos: SeekFrom) -> Result<u64>;
+}
+impl<'a, T: 'a + Seek> Seek for &'a mut T {
+	fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+		(**self).seek(pos)
+	}
 }
 
 /// Updates the slice as it reads

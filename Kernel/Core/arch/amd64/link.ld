@@ -20,6 +20,8 @@ SECTIONS {
 	.init : AT(ADDR(.init)) {
 		KEEP( *(.multiboot) )
 		*(.inittext)
+		*(.inittext.smp_init)
+		. = ALIGN(8);
 		*(.initdata)
 	}
 	
@@ -49,6 +51,11 @@ SECTIONS {
 		modules_base = .;
 		KEEP( *(.MODULE_LIST) )
 		modules_end = .;
+	}
+	.eh_frame : AT(ADDR(.eh_frame) - _kernel_base) {
+		eh_frame_base = .;
+		KEEP( *(.eh_frame .eh_frame.*) )
+		eh_frame_end = .;
 	}
 	
 	.data ALIGN (0x1000) : AT(ADDR(.data) - _kernel_base) {

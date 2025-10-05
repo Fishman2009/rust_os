@@ -5,7 +5,7 @@
 //! A FIFO queue type
 //!
 //! Current implementation is a linked list, but could be backed to Vec if required.
-use prelude::*;
+use crate::prelude::*;
 
 /// A basic linked-list queue
 pub struct Queue<T>
@@ -21,7 +21,7 @@ unsafe impl<T: Send> ::core::marker::Send for Queue<T> {}
 macro_rules! queue_init{ () => ($crate::lib::queue::Queue::new()) }
 
 struct QueueEntPtr<T>(Box<QueueEnt<T>>);
-struct QueueTailPtr<T>(::core::nonzero::NonZero<*mut QueueEnt<T>>);
+struct QueueTailPtr<T>(::core::ptr::NonNull<QueueEnt<T>>);
 
 struct QueueEnt<T>
 {
@@ -46,6 +46,7 @@ impl<T> Default for Queue<T>
 impl<T> Queue<T>
 {
 	/// Add an item to the end of the queue
+	//pub fn push<U: ::core::ops::CoerceUnsized<T>>(&mut self, value: U)
 	pub fn push(&mut self, value: T)
 	{
 		// SAFE: New QueueTailPtr should not outlive the object, tail does not alias
@@ -183,12 +184,12 @@ impl<T> QueueEntPtr<T>
 	}
 
 	fn into_inner(self) -> QueueEnt<T> {
-		::lib::mem::boxed::into_inner(self.0)
+		*self.0
 	}
 
 	/// UNSAFE: Requires that the tail pointer not outlive this object
 	unsafe fn tail_ptr(&mut self) -> QueueTailPtr<T> {
-		QueueTailPtr(::core::nonzero::NonZero::new(&mut *self.0))
+		QueueTailPtr(::core::ptr::NonNull::new_unchecked(&mut *self.0))
 	}
 }
 impl<T> ::core::ops::Deref for QueueEntPtr<T> {
@@ -202,11 +203,11 @@ impl<T> QueueTailPtr<T>
 {
 	/// UNSAFE: Can cause aliasing if called while &mut-s to the last object are active
 	unsafe fn get(&self) -> &QueueEnt<T> {
-		& **self.0
+		self.0.as_ref()
 	}
 	/// UNSAFE: Can cause aliasing if called while &mut-s to the last object are active
 	unsafe fn get_mut(&mut self) -> &mut QueueEnt<T> {
-		&mut **self.0
+		self.0.as_mut()
 	}
 }
 

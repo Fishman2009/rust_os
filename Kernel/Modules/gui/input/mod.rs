@@ -2,11 +2,12 @@
 // - By John Hodge (thePowersGang)
 //
 // Core/gui/input/mod.rs
-//! GUI input managment
+//! GUI input management
 #[allow(unused_imports)]
 use kernel::prelude::*;
 use self::keyboard::KeyCode;
-use core::sync::atomic::{AtomicUsize,ATOMIC_USIZE_INIT,Ordering};
+use core::sync::atomic::{Ordering,AtomicUsize,AtomicU8};
+use kernel::sync::Mutex;
 
 pub mod keyboard;
 pub mod mouse;
@@ -14,20 +15,24 @@ pub mod mouse;
 #[derive(Debug)]
 pub enum Event
 {
+	/// Window has been resized
+	Resize,
 	KeyDown(keyboard::KeyCode),
 	KeyUp(keyboard::KeyCode),
+	KeyFire(keyboard::KeyCode),
 	Text([u8; 6]),	// 6 bytes, as that can fit in a u64 with a 16-bit tag
 
 	MouseMove(u32,u32,i16,i16),
 	MouseDown(u32,u32,u8),
 	MouseUp(u32,u32,u8),
+	MouseClick(u32,u32, u8, u8),
 }
 
 struct ModKeyPair(AtomicUsize);
-const MOD_KEY_PAIR_INIT: ModKeyPair = ModKeyPair(ATOMIC_USIZE_INIT);
 
-struct MouseCursor(u32,u32);
-const MOUSE_CURSOR_INIT: MouseCursor = MouseCursor(0,0);
+struct MouseCursor {
+	graphics_cursor: ::kernel::sync::Mutex<::kernel::metadevs::video::CursorHandle>,
+}
 
 struct InputChannel
 {
@@ -37,7 +42,22 @@ struct InputChannel
 	alt_held: ModKeyPair,
 	//altgr: ModKeyPair,	// AltGr is usually just one... but meh
 	
+	last_key_pressed: AtomicU8,
+	//active_repeat: AtomicValue<u8>,
+	//repeat_start: Timestamp,
+	
 	cursor: MouseCursor,
+	// TODO: Mutex feels too heavy, but there may be multiple mice on one channel
+	double_click_info: Mutex<MouseClickInfo>,
+}
+
+struct MouseClickInfo
+{
+	button: u8,
+	count: u8,
+	time: ::kernel::time::TickCount,
+	x: u32,
+	y: u32,
 }
 
 //struct IMEState
@@ -46,13 +66,15 @@ struct InputChannel
 //	ime_val: u32,
 //}
 
-static MAIN_INPUT: InputChannel = InputChannel {
-	shift_held: MOD_KEY_PAIR_INIT,
-	ctrl_held: MOD_KEY_PAIR_INIT,
-	alt_held: MOD_KEY_PAIR_INIT,
-	//altgr: MOD_KEY_PAIR_INIT,
-	cursor: MOUSE_CURSOR_INIT,
-	};
+/// Maximum time in kernel ticks between subsequent press/release events for a click/doubleclick
+const DOUBLE_CLICK_TIMEOUT: u64 = 500;	// 500ms
+/// Maximum distance along any axis between press/release before a click is not registered
+const MAX_CLICK_MOVE: u32 = 10;
+static MAIN_INPUT: InputChannel = InputChannel::new();
+
+pub fn init() {
+	//MAIN_INPUT.cursor.
+}
 
 fn get_channel_by_index(_idx: usize) -> &'static InputChannel {
 	&MAIN_INPUT
@@ -60,8 +82,21 @@ fn get_channel_by_index(_idx: usize) -> &'static InputChannel {
 
 impl InputChannel
 {
+	const fn new() -> InputChannel {
+		InputChannel { 
+			shift_held: ModKeyPair::new(),
+			ctrl_held: ModKeyPair::new(),
+			alt_held: ModKeyPair::new(),
+			//altgr: ModKeyPair::new(),
+			cursor: MouseCursor::new(),
+			
+			last_key_pressed: AtomicU8::new(KeyCode::None as u8),
+			double_click_info: Mutex::new(MouseClickInfo::new()),
+			}
+	}
 	pub fn handle_key(&self, key: keyboard::KeyCode, release: bool)
 	{
+		log_trace!("key={:?}, release={}", key, release);
 		match (release, key)
 		{
 		// Maintain key states
@@ -78,7 +113,8 @@ impl InputChannel
 		(true, KeyCode::RightAlt) => self.alt_held.clear_r(),
 		(true, KeyCode::LeftAlt)  => self.alt_held.clear_l(),
 		// Check for session change commands, don't propagate if they fired
-		// - 'try_change_session' checks modifiers and permissions
+		// - 'try_change_session' checks for the required modifier keys and permissions
+		// TODO: Should this be handled by the `windows` module?
 		(false, KeyCode::Esc) => if self.try_change_session(0) { return ; },
 		(false, KeyCode::F1)  => if self.try_change_session(1) { return ; },
 		(false, KeyCode::F2)  => if self.try_change_session(2) { return ; },
@@ -95,43 +131,84 @@ impl InputChannel
 		_ => {},
 		}
 
-		// Handle text events
-		// - On key up, translate the keystroke into text (accounting for input state)
-		// TODO: Support repetition?
-		if release {
-			//if self.enable_input_translation {
-				let s = self.get_input_string(key);
-				if s.len() > 0 {
-					let mut buf = [0; 6];
-					buf.clone_from_slice( s.as_bytes() );
-					super::windows::handle_input( Event::Text(buf) );
-				}
-			//}
+		let last_key = self.last_key_pressed.load(Ordering::Relaxed);
+		if !release {
+			self.last_key_pressed.store(key as u8, Ordering::Relaxed);
+			super::windows::handle_input(/*self, */Event::KeyDown(key));
 		}
 
-		// TODO: Send key combination to active active window
-		if release {
-			super::windows::handle_input(/*self, */Event::KeyUp(key));
+		// Handle fire and text events
+		if key.is_modifier()
+		{
+			// Only fire a modifier on key-up IF they were the last one pressed
+			// - This allows "Gui" (windows) to fire on key-up while still being used as a modifier
+			if release && last_key == key as u8
+			{
+				super::windows::handle_input( Event::KeyFire(key) );
+			}
 		}
-		else {
-			super::windows::handle_input(/*self, */Event::KeyDown(key));
+		else
+		{
+			// TODO: Support repetition (of the last non-modifier pressed)
+			if !release
+			{
+				super::windows::handle_input( Event::KeyFire(key) );
+
+				// TODO: Should only generate text if no non-shift modifiers are depressed
+				//if self.enable_input_translation {
+					let s = self.get_input_string(key);
+					if s.len() > 0 {
+						let mut buf = [0; 6];
+						buf[.. s.len()].clone_from_slice( s.as_bytes() );
+						super::windows::handle_input( Event::Text(buf) );
+					}
+				//}
+			}
+		}
+
+		// Send key combination to active active window (via the window subsystem)
+		if release {
+			self.last_key_pressed.store(KeyCode::None as u8, Ordering::Relaxed);
+			super::windows::handle_input(/*self, */Event::KeyUp(key));
 		}
 	}
 	
+	pub fn handle_mouse_set(&self, norm_x: u16, norm_y: u16)
+	{
+		// Mouse movement, update cursor
+		let (dx,dy) = self.cursor.set_pos(norm_x, norm_y);
+		let (x,y) = self.cursor.pos();
+		self.double_click_info.lock().clear();
+		super::windows::handle_input(/*self, */Event::MouseMove(x, y, dx as i16, dy as i16));
+	}
 	pub fn handle_mouse_move(&self, dx: i16, dy: i16)
 	{
 		// Mouse movement, update cursor
 		self.cursor.move_pos(dx as i32, dy as i32);
 		let (x,y) = self.cursor.pos();
+		self.double_click_info.lock().clear();
 		super::windows::handle_input(/*self, */Event::MouseMove(x, y, dx, dy));
 	}
 	pub fn handle_mouse_btn(&self, btn: u8, release: bool)
 	{
 		let (x,y) = self.cursor.pos();
-		if release {
+		if release
+		{
+
+			// Released - check the double-click timer
+			if let Some(ev) = self.double_click_info.lock().check( x,y, btn )
+			{
+				super::windows::handle_input(/*self, */ev);
+			}
+
 			super::windows::handle_input(/*self, */Event::MouseUp(x, y, btn));
 		}
-		else {
+		else
+		{
+
+			// Pressed - reset the double-click timer
+			self.double_click_info.lock().reset(x,y, btn);
+
 			super::windows::handle_input(/*self, */Event::MouseDown(x, y, btn));
 		}
 	}
@@ -217,6 +294,9 @@ impl InputChannel
 }
 
 impl ModKeyPair {
+	const fn new() -> ModKeyPair {
+		ModKeyPair(AtomicUsize::new(0))
+	}
 	fn set_l(&self) { self.0.fetch_or(1, Ordering::Relaxed); }
 	fn set_r(&self) { self.0.fetch_or(2, Ordering::Relaxed); }
 	fn clear_l(&self) { self.0.fetch_and(!1, Ordering::Relaxed); }
@@ -226,11 +306,98 @@ impl ModKeyPair {
 	}
 }
 impl MouseCursor {
+	const fn new() -> MouseCursor {
+		MouseCursor {
+			graphics_cursor: ::kernel::sync::Mutex::new(::kernel::metadevs::video::CursorHandle::new()),
+			}
+	}
+	fn add_coord(cur: u32, d: i32) -> u32 {
+		if d < 0 {
+			u32::saturating_sub(cur, -d as u32)
+		}
+		else {
+			u32::saturating_add(cur, d as u32)
+		}
+	}
+
+	/// Set cursor position to normalised coordinates
+	fn set_pos(&self, norm_x: u16, norm_y: u16) -> (i32, i32) {
+		let mut lh = self.graphics_cursor.lock();
+		let pos = lh.get_pos();
+		let rect = match ::kernel::metadevs::video::get_display_for_pos(pos)
+			{
+			Ok(v) => v,
+			Err(v) => v,
+			};
+		let new_pos = ::kernel::metadevs::video::Pos {
+			x: rect.x() + ((rect.w() as u64 * norm_x as u64) >> 16) as u32,
+			y: rect.y() + ((rect.h() as u64 * norm_y as u64) >> 16) as u32,
+			};
+		lh.set_pos(new_pos);
+		(
+			(new_pos.x as i32 - pos.x as i32) as i32,
+			(new_pos.y as i32 - pos.y as i32) as i32,
+			)
+	}
 	fn move_pos(&self, dx: i32, dy: i32) {
-		// TODO
-		todo!("Mouse move by {},{}", dx, dy);
+		let mut lh = self.graphics_cursor.lock();
+		let mut pos = lh.get_pos();
+		pos.x = Self::add_coord(pos.x, dx);
+		pos.y = Self::add_coord(pos.y, dy);
+		lh.set_pos(pos);
 	}
 	fn pos(&self) -> (u32,u32) {
-		todo!("Mouse get position");
+		let pos = self.graphics_cursor.lock().get_pos();
+		(pos.x, pos.y)
+	}
+}
+
+impl MouseClickInfo
+{
+	const fn new() -> MouseClickInfo {
+		MouseClickInfo {
+			button: 0xFF, x: 0, y: 0,
+			time: 0,
+			count: 0,
+			}
+	}
+	fn clear(&mut self)
+	{
+		self.button = 0xFF;
+	}
+	fn reset(&mut self, x: u32, y: u32, button: u8)
+	{
+		self.button = button;
+		self.count = 0;
+		self.x = x;
+		self.y = y;
+		self.time = ::kernel::time::ticks();
+	}
+
+	fn check(&mut self, x: u32, y: u32, button: u8) -> Option<Event>
+	{
+		use kernel::lib::num::abs_diff;
+		if self.button != button {
+			self.clear();
+			None
+		}
+		else if (::kernel::time::ticks() - self.time) > DOUBLE_CLICK_TIMEOUT {
+			self.clear();
+			None
+		}
+		else if abs_diff(self.x, x) > MAX_CLICK_MOVE || abs_diff(self.y, y) > MAX_CLICK_MOVE {
+			self.clear();
+			None
+		}
+		else {
+			self.time = ::kernel::time::ticks();
+			self.x = x;
+			self.y = y;
+			if self.count < 0xFF {
+				self.count += 1;
+			}
+
+			Some( Event::MouseClick(x, y, button, self.count) )
+		}
 	}
 }

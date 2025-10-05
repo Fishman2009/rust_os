@@ -28,8 +28,20 @@ pub struct InterruptRegs
 #[no_mangle]
 #[doc(hidden)]
 /// Error handler called by assembly
+pub extern "C" fn spurious_handler(regs: &InterruptRegs)
+{
+	panic!("Spurious interrupt: v={} @ ip={:#x}", regs.intnum, regs.errorcode);
+}
+
+#[no_mangle]
+#[doc(hidden)]
+/// Error handler called by assembly
 pub extern "C" fn error_handler(regs: &InterruptRegs)
 {
+	// If the fault originated in kernel mode, emit a mode reset
+	//if regs.cs == 0x8 {
+	//	puts("\x1b[m");
+	//}
 	match regs.intnum
 	{
 	7 => {
@@ -40,7 +52,7 @@ pub extern "C" fn error_handler(regs: &InterruptRegs)
 		}
 
 		puts("#NM at "); puth(regs.rip); puts("\n");
-		if super::threads::enable_sse() {
+		if super::threads::enable_sse_and_restore() {
 			// SSE was disabled, try again with it enabled
 			return ;
 		}
@@ -52,43 +64,59 @@ pub extern "C" fn error_handler(regs: &InterruptRegs)
 	14 => {
 		let cr2 = get_cr2();
 		puts("PF ("); puth(regs.errorcode); puts(") at "); puth(cr2 as u64); puts(" by "); puth(regs.rip); puts(" SP="); puth(regs.rsp); puts("\n");
-		if ::arch::imp::memory::virt::handle_page_fault(cr2 as usize, regs.errorcode as u32) {
+		if crate::arch::amd64::memory::virt::handle_page_fault(cr2 as usize, regs.errorcode as u32) {
 			return ;
 		}
 		},
 	_ => { puts("ERROR "); puth(regs.intnum); puts(" (code "); puth(regs.errorcode); puts(")\n"); },
 	}
+	{
+		let _lh = crate::logging::acquire_lock_cpu();
+		puts("CS:RIP  = "); puth(regs.cs); puts(":"); puth(regs.rip); puts("\n");
+		puts("SS:RSP  = "); puth(regs.ss); puts(":"); puth(regs.rsp); puts("\n");
+		puts("CR2 = "); puth(get_cr2()); puts("\n");
+		puts("RAX "); puth64(regs.rax); puts("  RCX "); puth64(regs.rcx); puts("  ");
+		puts("RDX "); puth64(regs.rdx); puts("  RBX "); puth64(regs.rbx); puts("\n");
+		puts("RSI "); puth64(regs.rsi); puts("  RDI "); puth64(regs.rdi); puts("  ");
+		puts("RSP "); puth64(regs.rsp); puts("  RBP "); puth64(regs.rbp); puts("\n");
+		puts("R8  "); puth64(regs.r8 ); puts("  R9  "); puth64(regs.r9 ); puts("  ");
+		puts("R10 "); puth64(regs.r10); puts("  R11 "); puth64(regs.r11); puts("\n");
+		puts("R12 "); puth64(regs.r12); puts("  R13 "); puth64(regs.r13); puts("  ");
+		puts("R14 "); puth64(regs.r14); puts("  R15 "); puth64(regs.r15); puts("\n");
+	}
+
 	if regs.cs != 0x08 {
 		// It's a user fault, terminate that thread
+		puts("Stack :");
+		for i in 0 .. 4 {
+			puts(" ");
+			match crate::memory::user::read::<u64>(regs.rsp as usize + i * 8)
+			{
+			Ok(v) => puth64(v),
+			Err(_) => puts("INVAL"),
+			}
+		}
+		todo!("User fault");
 	}
-	puts("CS:RIP  = "); puth(regs.cs); puts(":"); puth(regs.rip); puts("\n");
-	puts("SS:RSP  = "); puth(regs.ss); puts(":"); puth(regs.rsp); puts("\n");
-	puts("CR2 = "); puth(get_cr2()); puts("\n");
-	puts("RAX "); puth64(regs.rax); puts("  RCX "); puth64(regs.rcx); puts("  ");
-	puts("RDX "); puth64(regs.rdx); puts("  RBX "); puth64(regs.rbx); puts("\n");
-	puts("RSI "); puth64(regs.rsi); puts("  RDI "); puth64(regs.rdi); puts("  ");
-	puts("RSP "); puth64(regs.rsp); puts("  RBP "); puth64(regs.rbp); puts("\n");
-	puts("R8  "); puth64(regs.r8 ); puts("  R9  "); puth64(regs.r9 ); puts("  ");
-	puts("R10 "); puth64(regs.r10); puts("  R11 "); puth64(regs.r11); puts("\n");
-	puts("R12 "); puth64(regs.r12); puts("  R13 "); puth64(regs.r13); puts("  ");
-	puts("R14 "); puth64(regs.r14); puts("  R15 "); puth64(regs.r15); puts("\n");
-
-
-	// For all other kernel-side errors, backtrace and lock
-	let mut bp = regs.rbp;
-	while let Some((newbp, ip)) = backtrace(bp)
+	else
 	{
-		puts(" > "); puth(ip);
-		bp = newbp;
+		// For all other kernel-side errors, backtrace and just spin
+
+		log_debug!(" > {}", super::SymPrint(regs.rip as usize));
+		let mut bp = regs.rbp;
+		while let Some((newbp, ip)) = backtrace(bp)
+		{
+			log_debug!(" > {}", super::SymPrint(ip as usize));
+			bp = newbp;
+		}
+		
+		// For interrupts 2 and 3, just resume
+		// - 3 = breakpoint, 2 = ? (NMI?)
+		if regs.intnum == 3 || regs.intnum == 2 {
+			return ;
+		}
+		loop {}
 	}
-	puts("\n");
-	
-	// For interrupts 2 and 3, don't backtrace and error.
-	// - 3 = breakpoint, 2 = ? (NMI?)
-	if regs.intnum == 3 || regs.intnum == 2 {
-		return ;
-	}
-	loop {}
 }
 
 fn get_cr2() -> u64
@@ -96,7 +124,7 @@ fn get_cr2() -> u64
 	// SAFE: Just reads CR2, no sideeffect
 	unsafe {
 		let cr2: u64;
-		asm!("movq %cr2, $0" : "=r" (cr2));
+		::core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, pure, preserves_flags));
 		cr2
 	}
 }
@@ -108,9 +136,11 @@ pub fn backtrace(bp: u64) -> Option<(u64,u64)>
 		return None;
 	}
 	if bp % 8 != 0 {
+		log_notice!("Backtrace ended: BP {:#x} unaligned", bp);
 		return None;
 	}
-	if ! ::memory::buf_valid(bp as *const (), 16) {
+	if ! crate::memory::buf_valid(bp as *const (), 16) {
+		log_notice!("Backtrace ended: {:#x}+0x10 not valid", bp);
 		return None;
 	}
 	
@@ -118,8 +148,8 @@ pub fn backtrace(bp: u64) -> Option<(u64,u64)>
 	// SAFE: Pointer access checked, any alias is benign
 	unsafe
 	{
-		let ptr: *const [u64; 2] = ::core::mem::transmute(bp);
-		if ! ::arch::memory::virt::is_reserved(ptr) {
+		let ptr: *const [u64; 2] = bp as usize as *const _;
+		if ! crate::arch::memory::virt::is_reserved(ptr) {
 			None
 		}
 		else {

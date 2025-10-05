@@ -1,70 +1,186 @@
 //
 //
 //
+//! Architecture-specific code
 
-/// Achitecture-specific code - AMD64 (aka x86-64)
-#[macro_use]
-#[cfg(arch="amd64")] #[path="amd64/mod.rs"]
-#[doc(hidden)]
-pub mod imp;	// Needs to be pub for exports to be avaliable
+cfg_if::cfg_if!{
+	if #[cfg(feature="test")] {
+		#[path="imp-test.rs"]
+		pub mod test;
 
-#[macro_use]
-#[cfg(arch="armv7")] #[path="armv7/mod.rs"]
-#[doc(hidden)]
-pub mod imp;
+		pub use self::test as imp;
+
+		// TODO: Include all architectures here, with tricks so they compile (for testing/IDE)
+		#[cfg(all(in_ide, target_arch="x86_64"))] pub mod amd64;
+	}
+	else {
+		// It would be nice to have all architectures built when running
+		// in the IDE, but there's conflicts getting access to the thread
+		// state.
+		// Also, inline assembly.
+		#[cfg(any(/* in_ide, */target_arch="x86_64" ))] pub mod amd64;
+		#[cfg(any(/* in_ide, */target_arch="arm"    ))] pub mod armv7;
+		#[cfg(any(/* in_ide, */target_arch="aarch64"))] pub mod armv8;
+		#[cfg(any(/* in_ide, */target_arch="riscv64"))] pub mod riscv64;
+
+		#[cfg(target_arch="x86_64")]
+		pub use self::amd64 as imp;
+		#[cfg(target_arch="arm")]
+		pub use self::armv7 as imp;
+		#[cfg(target_arch="aarch64")]
+		pub use self::armv8 as imp;
+		#[cfg(target_arch="riscv64")]
+		pub use self::riscv64 as imp;
+	}
+}
 
 // If on x86/amd64, import ACPI
-#[cfg(arch="amd64")]
+#[cfg(not(feature="test"))]
+#[cfg(any(target_arch="x86_64"))]
 pub use self::imp::acpi;
 
+#[allow(dead_code)]
+mod helpers {
+	pub mod x86_io_unavailable {
+		pub unsafe fn inb(_p: u16) -> u8 { panic!("calling inb not supported on this arch") }
+		pub unsafe fn inw(_p: u16) -> u16 { panic!("calling inw not supported on this arch") }
+		pub unsafe fn inl(_p: u16) -> u32 { panic!("calling inl not supported on this arch") }
+		#[cfg(false_)]
+		pub unsafe fn inq(_p: u16) -> u64 { panic!("calling inq not supported on this arch") }
+		pub unsafe fn outb(_p: u16, _v: u8) {}
+		pub unsafe fn outw(_p: u16, _v: u16) {}
+		pub unsafe fn outl(_p: u16, _v: u32) {}
+		#[cfg(false_)]
+		pub unsafe fn outq(_p: u16, _v: u64) {}
+	}
+}
 
+
+/// Memory management
 pub mod memory {
-	pub type PAddr = ::arch::imp::memory::PAddr;
-	pub type VAddr = ::arch::imp::memory::VAddr;
-	pub const PAGE_SIZE: usize = ::arch::imp::memory::PAGE_SIZE;
+	/// Physical address type
+	pub type PAddr = crate::arch::imp::memory::PAddr;
+	pub type VAddr = crate::arch::imp::memory::VAddr;
 
+	/// Size of a page/frame in bytes (always a power of two)
+	pub const PAGE_SIZE: usize = crate::arch::imp::memory::PAGE_SIZE;
+	/// Offset mask for a page
+	pub const PAGE_MASK: usize = PAGE_SIZE-1;
+
+	/// Address space layout
 	pub mod addresses {
-		use arch::imp::memory::addresses as imp;
+		use crate::arch::imp::memory::addresses as imp;
 
 		#[inline]
+		/// Returns `true` if the passed address is valid in every address space
 		pub fn is_global(addr: usize) -> bool {
 			imp::is_global(addr)
 		}
 
+		/// Size of a single kernel statck
 		pub const STACK_SIZE: usize = imp::STACK_SIZE;
 
+		/// Last first address after the user-controlled region
 		pub const USER_END: usize = imp::USER_END;
 
+		/// Start of the kernel stack region
 		pub const STACKS_BASE: usize = imp::STACKS_BASE;
+		/// End of the kernel stack region
 		pub const STACKS_END : usize = imp::STACKS_END ;
 
+		/// Start of hardware mappings
 		pub const HARDWARE_BASE: usize = imp::HARDWARE_BASE;
+		/// End of hardware mappings
 		pub const HARDWARE_END : usize = imp::HARDWARE_END ;
 
+		/// Start of the heap reservation
 		pub const HEAP_START: usize = imp::HEAP_START;
-		//pub const HEAP_END : usize = imp::HEAP_END ;
-	}
-	pub mod virt {
-		use arch::imp::memory::virt as imp;
-		
-		pub type AddressSpace = imp::AddressSpace;
+		/// End of the heap reservation
+		pub const HEAP_END : usize = imp::HEAP_END ;
 
-		pub type TempHandle<E> = imp::TempHandle<E>;
+		pub const BUMP_START: usize = imp::BUMP_START;
+		pub const BUMP_END: usize = imp::BUMP_END;
+
+		pub const PMEMREF_BASE: usize = imp::PMEMREF_BASE;
+		pub const PMEMREF_END : usize = imp::PMEMREF_END;
+		pub const PMEMBM_BASE: usize = imp::PMEMBM_BASE;
+		pub const PMEMBM_END : usize = imp::PMEMBM_END;
+	}
+	/// Virtual memory manipulation
+	pub mod virt {
+		use crate::arch::imp::memory::virt as imp;
+		
+		/// Handle to an address space
+		#[derive(Debug)]
+		pub struct AddressSpace(imp::AddressSpace);
+		impl AddressSpace
+		{
+			pub fn new(clone_start: usize, clone_end: usize) -> Result<AddressSpace,crate::memory::virt::MapError> {
+				imp::AddressSpace::new(clone_start, clone_end).map(AddressSpace)
+			}
+			pub fn pid0() -> AddressSpace {
+				AddressSpace(imp::AddressSpace::pid0())
+			}
+			pub fn inner(&self) -> &imp::AddressSpace {
+				&self.0
+			}
+		}
+
+		/// A handle to a temporarily mapped frame containing instances of 'T'
+		// TODO: TempHandle doesn't own the mapped frame - It probably should
+		pub struct TempHandle<T>(*mut T);
+		impl<T> TempHandle<T>
+		{
+			/// UNSAFE: User must ensure that address is valid, and that no aliasing occurs
+			pub unsafe fn new(phys: crate::arch::memory::PAddr) -> TempHandle<T> {
+				TempHandle( imp::temp_map(phys) )
+			}
+			/// Cast to another type
+			pub fn into<U>(self) -> TempHandle<U> {
+				let rv = TempHandle( self.0 as *mut U );
+				::core::mem::forget(self);
+				rv
+			}
+			pub fn phys_addr(&self) -> crate::memory::PAddr {
+				get_phys(self.0)
+			}
+		}
+		impl<T: crate::lib::POD> ::core::ops::Deref for TempHandle<T> {
+			type Target = [T];
+			fn deref(&self) -> &[T] {
+				// SAFE: We should have unique access, and data is POD
+				unsafe { ::core::slice::from_raw_parts(self.0, crate::PAGE_SIZE / ::core::mem::size_of::<T>()) }
+			}
+		}
+		impl<T: crate::lib::POD> ::core::ops::DerefMut for TempHandle<T> {
+			fn deref_mut(&mut self) -> &mut [T] {
+				// SAFE: We should have unique access, and data is POD
+				unsafe { ::core::slice::from_raw_parts_mut(self.0, crate::PAGE_SIZE / ::core::mem::size_of::<T>()) }
+			}
+		}
+		impl<T> ::core::ops::Drop for TempHandle<T> {
+			fn drop(&mut self) {
+				// SAFE: Address came from a call to temp_map
+				unsafe {
+					imp::temp_unmap(self.0);
+				}
+			}
+		}
 
 		pub fn post_init() {
 			imp::post_init()
 		}
 
 		#[inline]
-		pub fn get_phys<T>(p: *const T) -> ::memory::PAddr {
-			imp::get_phys(p)
+		pub fn get_phys<T: ?Sized>(p: *const T) -> crate::memory::PAddr {
+			imp::get_phys(p as *const ())
 		}
 		#[inline]
 		pub fn is_reserved<T>(p: *const T) -> bool {
 			imp::is_reserved(p)
 		}
 		#[inline]
-		pub fn get_info<T>(p: *const T) -> Option<(::memory::PAddr,::memory::virt::ProtectionMode)> {
+		pub fn get_info<T>(p: *const T) -> Option<(crate::memory::PAddr,crate::memory::virt::ProtectionMode)> {
 			imp::get_info(p)
 		}
 
@@ -73,109 +189,213 @@ pub mod memory {
 			imp::is_fixed_alloc(addr, size)
 		}
 		#[inline]
-		pub unsafe fn fixed_alloc(p: ::memory::PAddr, count: usize) -> Option<*mut ()> {
+		pub unsafe fn fixed_alloc(p: crate::memory::PAddr, count: usize) -> Option<*mut ()> {
 			imp::fixed_alloc(p, count)
 		}
 
 		#[inline]
 		/// Returns `true` if the provided address can have `map` called on without needing memory allocation
+		// Used in physical memory allocation to avoid recursion
 		pub fn can_map_without_alloc(a: *mut ()) -> bool {
-			todo!("can_map_without_alloc");
+			imp::can_map_without_alloc(a)
 		}
 
 		#[inline]
-		pub unsafe fn map(a: *mut (), p: ::memory::PAddr, mode: ::memory::virt::ProtectionMode) {
+		pub unsafe fn map(a: *mut (), p: crate::memory::PAddr, mode: crate::memory::virt::ProtectionMode) {
 			imp::map(a, p, mode)
 		}
 		#[inline]
-		pub unsafe fn reprotect(a: *mut (), mode: ::memory::virt::ProtectionMode) {
+		pub unsafe fn reprotect(a: *mut (), mode: crate::memory::virt::ProtectionMode) {
 			imp::reprotect(a, mode)
 		}
 		#[inline]
-		pub unsafe fn unmap(a: *mut ()) -> Option<::memory::PAddr> {
+		pub unsafe fn unmap(a: *mut ()) -> Option<crate::memory::PAddr> {
 			imp::unmap(a)
-		}
-	}
-	pub mod phys {
-		use arch::imp::memory::phys as imp;
-
-		#[inline]
-		pub fn ref_frame(frame_idx: u64) {
-			imp::ref_frame(frame_idx)
-		}
-		#[inline]
-		pub fn deref_frame(frame_idx: u64) -> u32 {
-			imp::deref_frame(frame_idx)
-		}
-		#[inline]
-		pub fn get_multiref_count(frame_idx: u64) -> u32 {
-			imp::get_multiref_count(frame_idx)
-		}
-
-		#[inline]
-		pub fn mark_free(frame_idx: u64) -> bool {
-			imp::mark_free(frame_idx)
-		}
-		#[inline]
-		pub fn mark_used(frame_idx: u64) {
-			imp::mark_used(frame_idx)
 		}
 	}
 }
 
+/// Syncronisation types (spinlock and interrupt holding)
 pub mod sync {
 	use super::imp::sync as imp;
-	pub type Spinlock<T> = imp::Spinlock<T>;
-	pub type HeldSpinlock<'a, T: 'a> = imp::HeldSpinlock<'a, T>;
+
+	/// Lightweight protecting spinlock
+	pub struct Spinlock<T>
+	{
+		#[doc(hidden)]
+		/*pub*/ lock: imp::SpinlockInner,
+		#[doc(hidden)]
+		pub value: ::core::cell::UnsafeCell<T>,
+	}
+	unsafe impl<T: Send> Sync for Spinlock<T> {}
+
+
+	impl<T> Spinlock<T>
+	{
+		/// Create a new spinning lock
+		pub const fn new(val: T) -> Spinlock<T> {
+			Spinlock {
+				lock: imp::SpinlockInner::new(),
+				value: ::core::cell::UnsafeCell::new(val),
+			}
+		}
+		pub fn get_mut(&mut self) -> &mut T {
+			// SAFE: &mut to lock
+			unsafe { &mut *self.value.get() }
+		}
+		
+		/// Lock this spinning lock
+		//#[not_safe(irq)]
+		pub fn lock(&self) -> HeldSpinlock<'_, T>
+		{
+			self.lock.inner_lock();
+			HeldSpinlock { lock: self }
+		}
+
+		/// Lock this spinning lock (accepting risk of panick/deadlock from IRQs)
+		//#[is_safe(irq)]
+		pub fn lock_irqsafe(&self) -> HeldSpinlock<'_, T> {
+			self.lock.inner_lock();
+			HeldSpinlock { lock: self }
+		}
+		/// Attempt to acquire the lock, returning None if it is already held by this CPU
+		//#[is_safe(irq)]
+		pub fn try_lock_cpu(&self) -> Option<HeldSpinlock<'_, T>>
+		{
+			if self.lock.try_inner_lock_cpu() {
+				Some( HeldSpinlock { lock: self } )
+			}
+			else {
+				None
+			}
+		}
+	}
+	// Some special functions on non-wrapping spinlocks
+	impl Spinlock<()>
+	{
+		pub unsafe fn unguarded_lock(&self) {
+			self.lock.inner_lock()
+		}
+		pub unsafe fn unguarded_release(&self) {
+			self.lock.inner_release()
+		}
+	}
+	impl<T: Default> Default for Spinlock<T>
+	{
+		fn default() -> Self {
+			Spinlock::new(Default::default())
+		}
+	}
+
+	pub struct HeldSpinlock<'lock, T: 'lock>
+	{
+		lock: &'lock Spinlock<T>,
+	}
+	impl<'lock,T> ::core::ops::Drop for HeldSpinlock<'lock, T>
+	{
+		fn drop(&mut self)
+		{
+			// SAFE: This is the RAII handle for the lock
+			unsafe {
+				self.lock.lock.inner_release();
+			}
+		}
+	}
+
+	impl<'lock,T> ::core::ops::Deref for HeldSpinlock<'lock, T>
+	{
+		type Target = T;
+		fn deref(&self) -> &T {
+			// SAFE: & to handle makes & to value valid
+			unsafe { &*self.lock.value.get() }
+		}
+	}
+	impl<'lock,T> ::core::ops::DerefMut for HeldSpinlock<'lock, T>
+	{
+		fn deref_mut(&mut self) -> &mut T {
+			// SAFE: &mut to handle makes &mut to value valid
+			unsafe { &mut *self.lock.value.get() }
+		}
+	}
+
 	pub type HeldInterrupts = imp::HeldInterrupts;
 
 	#[inline]
+	/// Halt interrupts and return a RAII handle
 	pub fn hold_interrupts() -> HeldInterrupts {
 		imp::hold_interrupts()
+	}
+
+
+	/// UNSAFE: Not strictly speaking...
+	pub unsafe fn stop_interrupts() {
+		imp::stop_interrupts()
+	}
+	/// UNSAFE: Can be used to break `hold_interrupts`, and other related assumptions
+	pub unsafe fn start_interrupts() {
+		imp::start_interrupts()
 	}
 }
 pub mod interrupts {
 	use super::imp::interrupts as imp;
 
+	/// Architecture-specific IRQ binding error type
 	pub type BindError = imp::BindError;
-	pub type IRQHandle = imp::IRQHandle;
 
+	/// IRQ handle (unbinds the IRQ when dropped)
+	#[derive(Default)]
+	pub struct IRQHandle(#[allow(dead_code)] imp::IRQHandle);
+	impl IRQHandle {
+		///// Disable/mask-off this IRQ (for when processing is scheduled)
+		//pub fn disable(&self) {
+		//}
+		///// Enable/mask-on this IRQ (for when processing is complete)
+		//pub fn enable(&self) {
+		//}
+	}
 	
 	#[inline]
+	/// Attach a callback to an IRQ/interrupt
 	pub fn bind_gsi(gsi: usize, handler: fn(*const()), info: *const ()) -> Result<IRQHandle, BindError> {
-		imp::bind_gsi(gsi, handler, info)
+		imp::bind_gsi(gsi, handler, info).map(|v| IRQHandle(v))
 	}
 }
 pub mod boot {
 	use super::imp::boot as imp;
+
+
+	pub struct ModuleInfo
+	{
+		pub base: crate::arch::memory::PAddr,
+		pub length: usize,
+		pub name: &'static str,
+	}
+	impl ModuleInfo {
+		pub const EMPTY: Self = ModuleInfo { base: 0, length: 0, name: "" };
+	}
 
 	#[inline]
 	pub fn get_boot_string() -> &'static str {
 		imp::get_boot_string()
 	}
 	#[inline]
-	pub fn get_video_mode() -> Option<::metadevs::video::bootvideo::VideoMode> {
+	pub fn get_video_mode() -> Option<crate::metadevs::video::bootvideo::VideoMode> {
 		imp::get_video_mode()
 	}
 	#[inline]
-	pub fn get_memory_map() -> &'static [::memory::MemoryMapEnt] {
+	pub fn get_memory_map() -> &'static [crate::memory::MemoryMapEnt] {
 		imp::get_memory_map()
 	}
-}
-pub mod pci {
-	use super::imp::pci as imp;
-
 	#[inline]
-	pub fn read(a: u32) -> u32 {
-		imp::read(a)
+	pub fn get_modules() -> &'static [ModuleInfo] {
+		imp::get_modules()
 	}
 	#[inline]
-	pub fn write(a: u32, v: u32) {
-		imp::write(a, v)
+	pub fn release_preboot_video() {
+		imp::release_preboot_video();
 	}
 }
 pub mod threads {
-	use lib::mem::Box;
 	use super::imp::threads as imp;
 
 	pub type State = imp::State;
@@ -186,33 +406,38 @@ pub mod threads {
 	}
 
 	#[inline]
-	pub fn set_thread_ptr(t: Box<::threads::Thread>) {
+	pub fn set_thread_ptr(t: crate::threads::ThreadPtr) {
 		imp::set_thread_ptr(t)
 	}
 	#[inline]
-	pub fn get_thread_ptr() -> Option<Box<::threads::Thread>> {
+	pub fn get_thread_ptr() -> Option<crate::threads::ThreadPtr> {
 		imp::get_thread_ptr()
 	}
 	#[inline]
-	pub fn borrow_thread() -> *const ::threads::Thread {
+	pub fn borrow_thread() -> *const crate::threads::Thread {
 		imp::borrow_thread()
 	}
 
 	#[inline]
-	pub fn idle() {
-		imp::idle()
+	pub fn idle(held_interrupts: super::sync::HeldInterrupts) {
+		imp::idle(held_interrupts)
 	}
 	#[inline]
-	pub fn switch_to(t: Box<::threads::Thread>) {
+	pub fn get_idle_thread() -> crate::threads::ThreadPtr {
+		imp::get_idle_thread()
+	}
+	#[inline]
+	pub fn switch_to(t: crate::threads::ThreadPtr) {
 		imp::switch_to(t)
 	}
 
 	#[inline]
-	pub fn start_thread<F: FnOnce()+Send+'static>(thread: &mut ::threads::Thread, code: F) {
+	pub fn start_thread<F: FnOnce()+Send+'static>(thread: &mut crate::threads::Thread, code: F) {
 		imp::start_thread(thread, code)
 	}
 }
 
+/// x86 IO bus accesses
 pub mod x86_io {
 	use super::imp::x86_io as imp;
 
@@ -222,18 +447,36 @@ pub mod x86_io {
 	pub unsafe fn inw(p: u16) -> u16 { imp::inw(p) }
 	#[inline]
 	pub unsafe fn inl(p: u16) -> u32 { imp::inl(p) }
+	#[inline] #[cfg(false_)]
+	pub unsafe fn inq(p: u16) -> u64 { imp::inq(p) }
 	#[inline]
 	pub unsafe fn outb(p: u16, v: u8) { imp::outb(p, v) }
 	#[inline]
 	pub unsafe fn outw(p: u16, v: u16) { imp::outw(p, v) }
 	#[inline]
 	pub unsafe fn outl(p: u16, v: u32) { imp::outl(p, v) }
+	#[inline] #[cfg(false_)]
+	pub unsafe fn outq(p: u16, v: u64) { imp::outq(p, v) }
 }
 
+pub mod time {
+	use crate::arch::imp::time as imp;
+
+	#[inline]
+	pub fn request_tick(target_time: u64) {
+		imp::request_tick(target_time)
+	}
+
+	/// Return the system timestamp (milliseconds since an arbitrary point)
+	#[inline]
+	pub fn cur_timestamp() -> u64 {
+		imp::cur_timestamp()
+	}
+}
 
 #[inline]
 pub fn puts(s: &str) {
-	imp::puts(s);
+	imp::puts(s)
 }
 #[inline]
 pub fn puth(v: u64) {
@@ -241,16 +484,30 @@ pub fn puth(v: u64) {
 }
 
 #[inline]
-pub fn cur_timestamp() -> u64 {
-	imp::cur_timestamp()
-}
-#[inline]
 pub fn print_backtrace() {
 	imp::print_backtrace()
+}
+
+/// Get the arbitrary index of the currently active CPU (for logging only, as CPU number can change randomly due to IRQs)
+#[inline]
+pub fn cpu_num() -> u32 {
+	imp::cpu_num()
 }
 
 #[inline]
 pub unsafe fn drop_to_user(entry: usize, stack: usize, args_len: usize) -> ! {
 	imp::drop_to_user(entry, stack, args_len)
+}
+
+/// Halt the system, for a kernel panic.
+#[inline]
+pub unsafe fn halt() -> ! {
+	imp::halt()
+}
+
+/// Trigger a reboot
+#[inline]
+pub unsafe fn reboot() -> ! {
+	imp::reboot()
 }
 

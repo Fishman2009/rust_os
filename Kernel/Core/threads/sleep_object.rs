@@ -3,64 +3,141 @@
 //
 // Core/threads/sleep_object.rs
 //! Sleep object
-use prelude::*;
 use core::ops;
-use super::thread::{Thread, RunState};
+use super::thread::{ThreadPtr, RunState};
 use super::s_runnable_threads;
 
 /// An object on which a thread can sleep, woken by various event sources
 ///
 /// This object should not be moved while references are active
-pub struct SleepObject
+pub struct SleepObject<'a>
 {
+	// Type that allows `fn get_ref` to borrow self and prevent moving
+	_nomove: ::core::marker::PhantomData<&'a SleepObject<'a>>,
 	name: &'static str,
-	inner: ::sync::Spinlock< SleepObjectInner >,
+	inner: crate::sync::Spinlock< SleepObjectInner >,
 }
-impl_fmt! {
-	Debug(self,f) for SleepObject {{
+impl<'a> ::core::fmt::Debug for SleepObject<'a>
+{
+	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
 		let lh = self.inner.lock();
 		write!(f, "SleepObject(\"{}\" {} refs, flag={})", self.name, lh.reference_count, lh.flag)
-	}}
+	}
 }
 #[derive(Default)]
 struct SleepObjectInner
 {
 	flag: bool,
 	reference_count: usize,
-	thread: Option<Box<Thread>>,
+	thread: Option<ThreadPtr>,
 }
 
-/// Referece to an active sleep object
+/// Reference to an active sleep object
 pub struct SleepObjectRef
 {
-	obj: *const SleepObject,
+	// 'static is useful to avoid needing a lifetime param here... AND it prevents calling
+	// get_ref again
+	obj: ::core::ptr::NonNull<SleepObject<'static>>,
 }
 unsafe impl ::core::marker::Send for SleepObjectRef {}
 
-impl SleepObject
+#[derive(Default)]
+pub struct AtomicSleepObjectRef {
+	ptr: ::core::sync::atomic::AtomicPtr<SleepObject<'static>>,
+}
+impl AtomicSleepObjectRef {
+	pub const fn new() -> Self {
+		AtomicSleepObjectRef {
+			ptr: ::core::sync::atomic::AtomicPtr::new(::core::ptr::null_mut())
+		}
+	}
+	pub fn take(&self) -> Option<SleepObjectRef> {
+		let p = self.ptr.swap(::core::ptr::null_mut(), ::core::sync::atomic::Ordering::Relaxed);
+		::core::ptr::NonNull::new(p).map(|obj| SleepObjectRef { obj })
+	}
+	pub fn signal(&self) -> bool {
+		let p = self.ptr.load(::core::sync::atomic::Ordering::Relaxed);
+		if ! p.is_null() {
+			// SAFE: Valid pointer
+			unsafe { (*p).signal(); }
+			true
+		}
+		else {
+			false
+		}
+	}
+	pub fn set(&self, r: SleepObjectRef) {
+		self.ptr.store(r.obj.as_ptr(), ::core::sync::atomic::Ordering::Relaxed);
+		::core::mem::forget(r);
+	}
+}
+impl ::core::ops::Drop for AtomicSleepObjectRef {
+	fn drop(&mut self) {
+		drop(self.take());
+	}
+}
+
+#[derive(Default)]
+pub struct SleepObjectSet(::alloc::vec::Vec<SleepObjectRef>);
+impl SleepObjectSet {
+	pub const fn new() -> Self {
+		SleepObjectSet(::alloc::vec::Vec::new())
+	}
+	pub fn signal(&self) {
+		for v in &self.0 {
+			v.signal();
+		}
+	}
+	pub fn add(&mut self, obj: &SleepObject) {
+		for v in &self.0 {
+			if v.is_from(obj) {
+				return ;
+			}
+		}
+		self.0.push(obj.get_ref());
+	}
+	pub fn remove(&mut self, obj: &SleepObject) {
+		self.0.retain(|v| !v.is_from(obj));
+	}
+}
+
+impl<'a> SleepObject<'a>
 {
 	/// Create a new sleep object
-	pub fn new(name: &'static str) -> SleepObject
+	/// UNSAFE: The caller must ensure that this type's destructor is called (maintaining the correctness of obtained SleepObjectRef instances)
+	pub const unsafe fn new(name: &'static str) -> SleepObject<'static>
 	{
 		SleepObject {
+			_nomove: ::core::marker::PhantomData,
 			name: name,
-			inner: Default::default(),
+			inner: crate::sync::Spinlock::new(SleepObjectInner {
+				flag: false,
+				reference_count: 0,
+				thread: None,
+				}),
+		}
+	}
+	/// Create a new sleep object and call a closure with it
+	pub fn with_new<T>(name: &'static str, f: impl FnOnce(&mut SleepObject)->T) -> T {
+		// SAFE: Destructor is called
+		unsafe {
+			let mut v = Self::new(name);
+			// TODO: Pass a handle instead?
+			f(&mut v)
 		}
 	}
 	
 	/// Wait the current thread on this object
 	pub fn wait(&self)
 	{
-		//log_trace!("SleepObject::wait {:p} '{}'", self, self.name);
-		
-		let irql = ::sync::hold_interrupts();
+		let irql = crate::sync::hold_interrupts();
 		let mut lh = self.inner.lock();
 		assert!( lh.thread.is_none(), "A thread is already sleeping on object {:p} '{}'", self, self.name );
 		
 		if lh.flag == false
 		{
 			let mut cur = super::get_cur_thread();
-			cur.run_state = RunState::Sleep(self as *const _);
+			cur.run_state = RunState::Sleep(self as *const _ as *const () as *const _);	// Go via () to erase the lifetime
 			lh.thread = Some(cur);
 			
 			::core::mem::drop(lh);
@@ -80,13 +157,12 @@ impl SleepObject
 	}
 	
 	/// Signal this sleep object (waking threads)
-	#[tag_safe(irq)]
-	#[allow(not_tagged_safe)]	// Holds an IRQ lock
+	//#[is_safe(irq)]	// Holds interrupts before locking
 	pub fn signal(&self)
 	{
 		//log_trace!("SleepObject::signal {:p} '{}'", self, self.name);
 		
-		let _irq_lock = ::sync::hold_interrupts();
+		let _irq_lock = crate::sync::hold_interrupts();
 		let mut lh = self.inner.lock();
 		// 1. Check for a waiter
 		if let Some(mut t) = lh.thread.take()
@@ -102,16 +178,17 @@ impl SleepObject
 	
 	/// Obtain a reference to the sleep object
 	///
-	/// NOTE: After this is called, self must not move
-	pub fn get_ref(&self) -> SleepObjectRef {
+	/// NOTE: After this is called, self must not move. This is enforced using a self-borrow
+	pub fn get_ref(&'a self) -> SleepObjectRef {
 		self.inner.lock().reference_count += 1;
 		SleepObjectRef {
-			obj: self as *const _,
+			// SAFE: not null
+			obj: unsafe { ::core::ptr::NonNull::new_unchecked(self as *const _ as *const () as *mut _) },
 		}
 	}
 }
 
-impl ops::Drop for SleepObject
+impl<'a> ops::Drop for SleepObject<'a>
 {
 	fn drop(&mut self)
 	{
@@ -124,16 +201,16 @@ impl SleepObjectRef
 {
 	/// Checks if this reference points to the passed object
 	pub fn is_from(&self, obj: &SleepObject) -> bool {
-		self.obj == obj as *const _
+		self.obj.as_ptr() == obj as *const _ as *const () as *mut SleepObject<'static>
 	}
 }
 impl ops::Deref for SleepObjectRef
 {
-	type Target = SleepObject;
+	type Target = SleepObject<'static>;
 	
-	fn deref(&self) -> &SleepObject {
+	fn deref(&self) -> &SleepObject<'static> {
 		// SAFE: Reference counting ensures that this pointer is valid.
-		unsafe { &*self.obj }   // > ASSUMPTION: The SleepObject doesn't move after it's borrowed
+		unsafe { &*self.obj.as_ptr() }   // > ASSUMPTION: The SleepObject doesn't move after it's borrowed
 	}
 }
 
@@ -142,7 +219,7 @@ impl ops::Drop for SleepObjectRef
 	fn drop(&mut self)
 	{
 		// SAFE: Should still be valid
-		let mut lh = unsafe { (*self.obj).inner.lock() };
+		let mut lh = unsafe { (*self.obj.as_ptr()).inner.lock() };
 		assert!(lh.reference_count > 0, "Sleep object's reference count is zero when dropping a reference");
 		lh.reference_count -= 1;
 	}

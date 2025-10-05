@@ -2,8 +2,10 @@
 //
 //
 //!
+#![cfg_attr(test,allow(dead_code))]
 
 #[repr(C)]
+#[allow(non_camel_case_types)]
 pub struct Elf32_Sym {
 	st_name: u32,
 	st_value: u32,
@@ -24,10 +26,11 @@ static mut S_SYMS: State = State { symtab: &[], strtab: &[], addr_offset: 0 };
 
 /// UNSAFE: Should only ever be called once, and before multithreading
 pub unsafe fn set_symtab(symtab: &'static [Elf32_Sym], strtab: &'static [u8], offset: usize) {
+	#![allow(static_mut_refs)]
 	assert!(S_SYMS.symtab.len() == 0, "Setting symbol table twice");
 	S_SYMS = State {
-		symtab: symtab,
-		strtab: strtab,
+		symtab,
+		strtab,
 		addr_offset: offset,
 		};
 }
@@ -41,7 +44,7 @@ impl<'a> ::core::fmt::Display for Demangle<'a> {
 			{
 				let n = s.read_num();
 				if n == 0 { break ; }
-				try!(write!(f, "::{}", &s[..n]));
+				write!(f, "::{}", &s[..n])?;
 				s = &s[n..];
 			}
 			write!(f, "::{}", s)

@@ -4,10 +4,10 @@
 // Core/threads/worker_thread.rs
 //! Management of kernel worker threads (short or long)
 #[allow(unused_imports)]
-use prelude::*;
+use crate::prelude::*;
 
 
-pub struct WorkerThread(super::thread::ThreadHandle);
+pub struct WorkerThread(#[allow(dead_code)] super::thread::ThreadHandle);
 
 impl WorkerThread
 {
@@ -17,6 +17,17 @@ impl WorkerThread
 	{
 		let handle = super::thread::ThreadHandle::new(name, fcn, super::S_PID0.clone());
 		WorkerThread(handle)
+	}
+
+	// TODO: Allow the worker to return a value?
+	pub fn wait(&self) -> Result<(),()>
+	{
+		if ! cfg!(feature="test") {
+			todo!("Wait for worker thread to terminate");
+		}
+		else {
+			Ok( () )
+		}
 	}
 }
 

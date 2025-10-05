@@ -1,10 +1,14 @@
-#![feature(no_std,linkage)]
+// "Tifflin" Kernel - VirtIO Driver
+// - By John Hodge (thePowersGang)
+//
+// virtio/lib.rs
+//! Virtual IO devices
 #![no_std]
-#![feature(core_slice_ext)]
-#![feature(ref_slice)]
-#![feature(raw)]	// Used for unsized struct construction
+#![feature(linkage)]
+#![feature(arbitrary_self_types)]
 
 #[macro_use] extern crate kernel;
+extern crate gui;
 
 module_define!{VirtIO, [DeviceManager, Storage], init}
 

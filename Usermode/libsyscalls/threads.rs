@@ -2,17 +2,34 @@
 //
 //
 //! Thread management system calls
+use crate::values as v;
+
+#[derive(Debug)]
+pub enum RecvObjectError
+{
+	NoObject,
+	ClassMismatch(u16),
+}
+impl ::core::fmt::Display for RecvObjectError {
+	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+		match self
+		{
+		&RecvObjectError::NoObject => f.write_str("No object on queue"),
+		&RecvObjectError::ClassMismatch(class) => write!(f, "Object class mismatch (was {} {})", class, v::get_class_name(class)),
+		}
+	}
+}
 
 #[inline]
-pub unsafe fn start_thread(ip: usize, sp: usize, tlsbase: usize) -> Result<u32, u32> {
-	::to_result( syscall!(CORE_STARTTHREAD, ip, sp, tlsbase) as usize )
+pub unsafe fn start_thread(ip: usize, sp: usize, tls_base: usize) -> Result<u32, u32> {
+	::to_result( ::syscall(v::CORE_STARTTHREAD { ip, sp, tls_base }) as usize )
 }
 #[inline]
 pub fn exit_thread() -> ! {
 	// SAFE: Syscall
 	unsafe {
-		syscall!(CORE_EXITTHREAD);
-		::core::intrinsics::unreachable();
+		crate::syscall(v::CORE_EXITTHREAD {});
+		::core::hint::unreachable_unchecked()
 	}
 }
 
@@ -21,8 +38,6 @@ pub fn exit_thread() -> ! {
 pub static S_THIS_PROCESS: ThisProcess = ThisProcess;//( ::ObjectHandle(0) );
 
 define_waits!{ ThisProcessWaits => (
-	recv_obj:has_recv_obj = ::values::EV_THISPROCESS_RECVOBJ,
-	recv_msg:has_recv_msg = ::values::EV_THISPROCESS_RECVMSG,
 )}
 
 /// 
@@ -36,76 +51,114 @@ impl ThisProcess
 		r
 	}
 	#[inline]
-	/// Obtain the 'n'th unclaimed object of the specifed type
-	pub fn receive_object<T: ::Object>(&self, idx: usize) -> Result<T, ()> {
-		self.with_obj(|obj| 
+	/// Obtain the 'n'th unclaimed object of the specified type
+	pub fn receive_object<T: ::Object>(&self, tag: &str) -> Result<T, RecvObjectError> {
+		assert!(tag.len() <= 8);
+		self.with_obj(|obj|
 			// SAFE: Syscall
-			match super::ObjectHandle::new( unsafe { obj.call_2(::values::CORE_THISPROCESS_RECVOBJ, T::class() as usize, idx) } as usize )
+			match super::ObjectHandle::new( unsafe { obj.call_m(v::CORE_THISPROCESS_RECVOBJ { tag: v::FixedStr8::from(tag), class: T::class() }) } as usize )
 			{
 			Ok(v) => Ok(T::from_handle(v)),
-			Err(e) => panic!("receive_object error {}", e),
+			Err(e @ 0 ..= 0xFFFF) => Err( RecvObjectError::ClassMismatch(e as u16) ),
+			Err(0x1_0000) => Err( RecvObjectError::NoObject ),
+			Err(e) => panic!("receive_object error {:#x}", e),
 			}
 		)
 	}
-
-	#[inline]
-	pub fn recv_msg(&self, data: &mut [u8]) -> Option<(usize, u32)> {
-		// SAFE: Syscall
-		let rv = unsafe { self.with_obj(|obj| obj.call_2(::values::CORE_THISPROCESS_RECVMSG, data.as_ptr() as usize, data.len())) };
-		if rv == 0 {
-			None
-		}
-		else {
-			let (id, size) = ((rv >> 32) as u32, (rv & 0xFFFFFFFF) as u32);
-			Some( (size as usize, id) )
-		}
-	}
 }
 impl ::Object for ThisProcess {
-	const CLASS: u16 = ::values::CLASS_CORE_THISPROCESS;
+	const CLASS: u16 = v::CLASS_CORE_THISPROCESS;
 	fn class() -> u16 { panic!("Cannot send/recv 'ThisProcess'"); }
 	fn from_handle(_handle: ::ObjectHandle) -> Self { panic!("ThisProcess::from_handle not needed") }
 	fn into_handle(self) -> ::ObjectHandle { panic!("ThisProcess::into_handle not needed") }
 	fn handle(&self) -> &::ObjectHandle { panic!("ThisProcess::handle not needed") }
 
 	type Waits = ThisProcessWaits;
-	fn get_wait(&self, waits: ThisProcessWaits) -> ::values::WaitItem {
-		::values::WaitItem { object: 0, flags: waits.0 }
+	fn get_wait(&self, waits: ThisProcessWaits) -> v::WaitItem {
+		v::WaitItem { object: 0, flags: waits.0 }
 	}
-	fn check_wait(&self, wi: &::values::WaitItem) -> ThisProcessWaits {
+	fn check_wait(&self, wi: &v::WaitItem) -> ThisProcessWaits {
 		ThisProcessWaits(wi.flags)
 	}
 }
 
+
+#[cfg(not(arch="native"))]
+#[inline]
+pub fn start_process(name: &str,  clone_start: usize, clone_end: usize) -> Result<ProtoProcess,()> {
+	// SAFE: Syscall
+	let rv = unsafe { crate::syscall(values::CORE_STARTPROCESS { name, clone_start, clone_end }) };
+	match ::ObjectHandle::new(rv as usize)
+	{
+	Ok(v) => Ok( ProtoProcess(v) ),
+	Err(_e) => Err( () ),
+	}
+}
+#[cfg(arch="native")]
+#[inline]
+pub fn start_process(handle: crate::vfs::File, name: &str, args_nul: &[u8]) -> Result<ProtoProcess,u32> {
+	use crate::Object;
+	// SAFE: Syscall
+	let rv = unsafe { crate::syscall(values::CORE_STARTPROCESS { handle: handle.into_handle().into_raw(), name, args_nul }) };
+	match ::ObjectHandle::new(rv as usize)
+	{
+	Ok(v) => Ok( ProtoProcess(v) ),
+	Err(e) => Err( e ),
+	}
+}
+
+pub struct ProtoProcess(::ObjectHandle);
+impl ::Object for ProtoProcess {
+	const CLASS: u16 = v::CLASS_CORE_PROTOPROCESS;
+	fn class() -> u16 { Self::CLASS }
+	fn from_handle(handle: ::ObjectHandle) -> Self {
+		ProtoProcess(handle)
+	}
+	fn into_handle(self) -> ::ObjectHandle {
+		self.0
+	}
+	fn handle(&self) -> &::ObjectHandle {
+		&self.0
+	}
+
+	type Waits = ();
+}
+impl ProtoProcess
+{
+	#[inline]
+	/// Send an object to the child process. `tag` is a up-to 6 byte string naming the object for the child.
+	pub fn send_obj<O: ::Object>(&self, tag: &str, obj: O) {
+		let oh = obj.into_handle().into_raw();
+		// SAFE: Syscall
+		unsafe { self.0.call_m(v::CORE_PROTOPROCESS_SENDOBJ { tag: v::FixedStr8::from(tag), object_handle: oh }); }
+	}
+ 
+ 	#[inline]
+	pub fn start(self, entry: usize, stack: usize) -> Process {
+		// SAFE: Syscall
+		let rv = unsafe { self.0.call_v(v::CORE_PROTOPROCESS_START { ip: entry, sp: stack }) };
+		Process( ::ObjectHandle::new(rv as usize).expect("Error erturned from CORE_PROTOPROCESS_START - unexpected") )
+	}
+}
+
 define_waits!{ ProcessWaits => (
-	terminate:get_terminate = ::values::EV_PROCESS_TERMINATED,
+	terminate:get_terminate = v::EV_PROCESS_TERMINATED,
 )}
 pub struct Process(::ObjectHandle);
 impl Process {
 	#[inline]
 	pub fn terminate(&self) {
 		// SAFE: Syscall
-		unsafe { self.0.call_0(::values::CORE_PROCESS_KILL); }
-	}
-	#[inline]
-	pub fn send_obj<O: ::Object>(&self, obj: O) {
-		let oh = obj.into_handle().into_raw();
-		// SAFE: Syscall
-		unsafe { self.0.call_1(::values::CORE_PROCESS_SENDOBJ, oh as usize); }
-	}
-	#[inline]
-	pub fn send_msg(&self, id: u32, data: &[u8]) {
-		// SAFE: Syscall
-		unsafe { self.0.call_3(::values::CORE_PROCESS_SENDMSG, id as usize, data.as_ptr() as usize, data.len()); }
+		unsafe { self.0.call_m(v::CORE_PROCESS_KILL {}); }
 	}
 
 	#[inline]
-	pub fn wait_terminate(&self) -> ::values::WaitItem {
-		self.0.get_wait(::values::EV_PROCESS_TERMINATED)
+	pub fn wait_terminate(&self) -> v::WaitItem {
+		self.0.get_wait(v::EV_PROCESS_TERMINATED)
 	}
 }
 impl ::Object for Process {
-	const CLASS: u16 = ::values::CLASS_CORE_PROCESS;
+	const CLASS: u16 = v::CLASS_CORE_PROCESS;
 	fn class() -> u16 { Self::CLASS }
 	fn from_handle(handle: ::ObjectHandle) -> Self {
 		Process(handle)
@@ -117,22 +170,11 @@ impl ::Object for Process {
 }
 
 #[inline]
-pub fn start_process(entry: usize, stack: usize,  clone_start: usize, clone_end: usize) -> Result<Process,()> {
-	// SAFE: Syscall
-	let rv = unsafe { syscall!(CORE_STARTPROCESS, entry, stack, clone_start, clone_end) };
-	match ::ObjectHandle::new(rv as usize)
-	{
-	Ok(v) => Ok( Process(v) ),
-	Err(_e) => Err( () ),
-	}
-}
-
-#[inline]
 pub fn exit(code: u32) -> ! {
 	// SAFE: Syscall
 	unsafe {
-		syscall!(CORE_EXITPROCESS, code as usize);
-		::core::intrinsics::unreachable();
+		::syscall(v::CORE_EXITPROCESS { status: code });
+		::core::hint::unreachable_unchecked()
 	}
 }
 
@@ -145,10 +187,10 @@ pub use values::WaitItem;
 ///
 /// Returns the number of events that caused the wakeup (zero for timeout)
 #[inline]
-pub fn wait(items: &mut [WaitItem], wake_time_mono: u64) -> u32 {
+pub fn wait(items: &mut [WaitItem], wake_time_monotonic: u64) -> u32 {
 	// SAFE: Syscall
 	unsafe {
-		syscall!(CORE_WAIT, items.as_ptr() as usize, items.len(), wake_time_mono as usize) as u32
+		crate::syscall(values::CORE_WAIT { items, wake_time_monotonic }) as u32
 	}
 }
 

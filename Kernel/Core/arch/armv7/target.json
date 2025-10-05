@@ -1,14 +1,16 @@
 {
-	"data-layout": "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-s0:64:64-f80:128:128-n8:16:32:64-S128",
-	"llvm-target": "arm-unknown-linux-gnueabi",
+	"cpu": "cortex-a8",
+	"data-layout": "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64",
+	"llvm-target": "arm-unknown-none-gnueabi",
+	"llvm-floatabi": "soft",
 	"target-endian": "little",
 	"target-pointer-width": "32",
-	"target-word-size": "32",
+	"target-c-int-width": 32,
 	"os": "tifflin",
 	"arch": "arm",
-		"no-compiler-rt": true,
-		"features": "+v7,+db",
+	"abi": "eabi",
+		"linker-flavor": "ld",
+		"features": "+v7,+db,-neon,-vfp2,-vfp3,-vfp4,-fp16,+soft-float",
 		"executables": true,
-		"dynamic-linking": true,
-	"morestack": false
+		"dynamic-linking": true
 }

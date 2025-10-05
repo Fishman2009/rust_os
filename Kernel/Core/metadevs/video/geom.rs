@@ -4,7 +4,7 @@
 // Core/metadevs/video/mod.rs
 /// Geometry types
 #[allow(unused_imports)]
-use prelude::*;
+use crate::prelude::*;
 
 #[derive(Copy,Clone,PartialEq,Default)]
 pub struct Pos
@@ -29,35 +29,64 @@ pub struct Rect
 impl Pos
 {
 	/// Construct a new `Pos`
-	pub fn new(x: u32, y: u32) -> Pos {
+	pub const fn new(x: u32, y: u32) -> Pos {
 		Pos { x: x, y: y }
+	}
+
+	pub fn dist_sq(&self, other: &Pos) -> u64 {
+		let dx = self.x.abs_diff(other.x) as u64;
+		let dy = self.y.abs_diff(other.y) as u64;
+		dx*dx + dy*dy
+	}
+
+	pub fn offset(&self, dx: i32, dy: i32) -> Pos {
+		Pos {
+			x: (self.x as i32 + dx) as u32,
+			y: (self.y as i32 + dy) as u32,
+			}
+	}
+}
+impl ::core::ops::Sub<Pos> for Pos {
+	type Output = Pos;
+	fn sub(self, other: Pos) -> Pos {
+		Pos {
+			x: self.x - other.x,
+			y: self.y - other.y,
+			}
 	}
 }
 
 impl Dims
 {
 	/// Construct a new `Dims` struct
-	pub fn new(w: u32, h: u32) -> Dims {
-		Dims { w: w, h: h }
+	pub const fn new(w: u32, h: u32) -> Dims {
+		Dims { w, h }
 	}
 
 	/// Return the height
 	pub fn height(&self) -> u32 { self.h }
 	/// Return the width
 	pub fn width(&self) -> u32 { self.w }
+
+	pub fn min_of(&self, other: &Dims) -> Dims {
+		Dims {
+			w: ::core::cmp::min(self.w, other.w),
+			h: ::core::cmp::min(self.h, other.h),
+		}
+	}
 }
 
 impl Rect
 {
 	/// Construct a new `Rect`
-	pub fn new(x: u32, y: u32, w: u32, h: u32) -> Rect {
+	pub const fn new(x: u32, y: u32, w: u32, h: u32) -> Rect {
 		Rect {
 			pos: Pos { x: x, y: y },
 			dims: Dims::new(w,h),
 		}
 	}
 	/// Construct a new rect from a position and dimensions
-	pub fn new_pd(pos: Pos, dims: Dims) -> Rect {
+	pub const fn new_pd(pos: Pos, dims: Dims) -> Rect {
 		Rect { pos: pos, dims: dims }
 	}
 	
@@ -87,6 +116,15 @@ impl Rect
 	pub fn br(&self) -> Pos { Pos::new( self.x() + self.w(), self.y() + self.h() ) }
 	/// Returns the "inner" bottom-right point (pointing to within the rect)
 	pub fn br_inner(&self) -> Pos { Pos::new( self.x() + self.w() - 1, self.y() + self.h() - 1 ) }
+
+
+	/// Obtain the closest Pos in this Rect
+	pub fn clamp_pos(&self, pos: Pos) -> Pos {
+		let x = ::core::cmp::min( ::core::cmp::max(pos.x, self.left()), self.right() - 1  );
+		let y = ::core::cmp::min( ::core::cmp::max(pos.y, self.top() ), self.bottom() - 1 );
+		Pos::new(x, y)
+	}
+
 	
 	/// Returns true if this rect contains the provided point
 	pub fn contains(&self, pt: &Pos) -> bool {
@@ -122,7 +160,7 @@ impl Rect
 		if max_x1 < min_x2 && max_y1 < min_y2 {
 			Some( Rect {
 				pos: Pos { x: max_x1, y: max_y1 },
-				dims: Dims::new((min_x2 - max_x1), (min_y2 - max_y1))
+				dims: Dims::new(min_x2 - max_x1, min_y2 - max_y1)
 				} )
 		}
 		else {

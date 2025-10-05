@@ -1,39 +1,37 @@
-diff -rub libcore_orig/clone.rs libcore/clone.rs
---- libcore_orig/clone.rs	2015-09-22 19:09:25.170462066 +0800
-+++ libcore/clone.rs	2015-09-22 19:02:10.962704201 +0800
-@@ -80,7 +80,9 @@
- clone_impl! { u32 }
- clone_impl! { u64 }
- 
-+#[cfg(not(disable_float))]
- clone_impl! { f32 }
-+#[cfg(not(disable_float))]
- clone_impl! { f64 }
- 
- clone_impl! { () }
+Only in libcore/: clone.rs.orig
+Only in libcore/: clone.rs.rej
 diff -rub libcore_orig/default.rs libcore/default.rs
---- libcore_orig/default.rs	2015-09-22 19:09:25.166462033 +0800
-+++ libcore/default.rs	2015-09-22 19:02:10.962704201 +0800
-@@ -153,5 +153,7 @@
- default_impl! { i32, 0 }
- default_impl! { i64, 0 }
+--- libcore_orig/default.rs	2017-11-11 10:43:12.134174979 +0800
++++ libcore/default.rs	2017-11-11 10:40:42.210064028 +0800
+@@ -154,5 +154,7 @@
+ default_impl! { i64, 0, "Returns the default value of `0`" }
+ default_impl! { i128, 0, "Returns the default value of `0`" }
  
 +#[cfg(not(disable_float))]
- default_impl! { f32, 0.0f32 }
+ default_impl! { f32, 0.0f32, "Returns the default value of `0.0`" }
 +#[cfg(not(disable_float))]
- default_impl! { f64, 0.0f64 }
+ default_impl! { f64, 0.0f64, "Returns the default value of `0.0`" }
+Only in libcore/: default.rs.orig
+Only in libcore/: default.rs.rej
 diff -rub libcore_orig/fmt/mod.rs libcore/fmt/mod.rs
---- libcore_orig/fmt/mod.rs	2015-09-22 19:09:25.170462066 +0800
-+++ libcore/fmt/mod.rs	2015-09-22 19:02:10.962704201 +0800
-@@ -17,6 +17,7 @@
- use cell::{Cell, RefCell, Ref, RefMut, BorrowState};
+--- libcore_orig/fmt/mod.rs	2017-11-11 10:43:11.866148987 +0800
++++ libcore/fmt/mod.rs	2017-11-11 10:40:42.210064028 +0800
+@@ -15,12 +15,14 @@
+ use cell::{UnsafeCell, Cell, RefCell, Ref, RefMut};
  use marker::PhantomData;
  use mem;
 +#[cfg(not(disable_float))]
  use num::flt2dec;
  use ops::Deref;
  use result;
-@@ -1006,6 +1007,7 @@
+ use slice;
+ use str;
+ 
++#[cfg(not(disable_float))]
+ mod float;
+ mod num;
+ mod builders;
+@@ -1205,6 +1207,7 @@
      /// Takes the formatted parts and applies the padding.
      /// Assumes that the caller already has rendered the parts with required precision,
      /// so that `self.precision` can be ignored.
@@ -41,7 +39,7 @@ diff -rub libcore_orig/fmt/mod.rs libcore/fmt/mod.rs
      fn pad_formatted_parts(&mut self, formatted: &flt2dec::Formatted) -> Result {
          if let Some(mut width) = self.width {
              // for the sign-aware zero padding, we render the sign first and
-@@ -1042,6 +1044,7 @@
+@@ -1244,6 +1247,7 @@
          }
      }
  
@@ -49,38 +47,13 @@ diff -rub libcore_orig/fmt/mod.rs libcore/fmt/mod.rs
      fn write_formatted_parts(&mut self, formatted: &flt2dec::Formatted) -> Result {
          fn write_bytes(buf: &mut Write, s: &[u8]) -> Result {
              buf.write_str(unsafe { str::from_utf8_unchecked(s) })
-@@ -1406,6 +1409,7 @@
-     }
- }
- 
-+#[cfg(not(disable_float))]
- // Common code of floating point Debug and Display.
- fn float_to_decimal_common<T>(fmt: &mut Formatter, num: &T, negative_zero: bool) -> Result
-     where T: flt2dec::DecodableFloat
-@@ -1430,6 +1434,7 @@
-     fmt.pad_formatted_parts(&formatted)
- }
- 
-+#[cfg(not(disable_float))]
- // Common code of floating point LowerExp and UpperExp.
- fn float_to_exponential_common<T>(fmt: &mut Formatter, num: &T, upper: bool) -> Result
-     where T: flt2dec::DecodableFloat
-@@ -1483,7 +1488,9 @@
-         }
-     }
- } }
-+#[cfg(not(disable_float))]
- floating! { f32 }
-+#[cfg(not(disable_float))]
- floating! { f64 }
- 
- // Implementation of Display/Debug for various core types
+Only in libcore/fmt: mod.rs.orig
 diff -rub libcore_orig/intrinsics.rs libcore/intrinsics.rs
---- libcore_orig/intrinsics.rs	2015-09-22 19:09:25.170462066 +0800
-+++ libcore/intrinsics.rs	2015-09-22 19:02:10.962704201 +0800
-@@ -393,7 +393,10 @@
-     pub fn volatile_load<T>(src: *const T) -> T;
-     /// Perform a volatile store to the `dst` pointer.
+--- libcore_orig/intrinsics.rs	2017-11-11 10:43:12.062168001 +0800
++++ libcore/intrinsics.rs	2017-11-11 10:40:42.214064504 +0800
+@@ -1081,7 +1081,10 @@
+     /// The stabilized version of this intrinsic is
+     /// [`std::ptr::write_volatile`](../../std/ptr/fn.write_volatile.html).
      pub fn volatile_store<T>(dst: *mut T, val: T);
 +}
  
@@ -89,22 +62,45 @@ diff -rub libcore_orig/intrinsics.rs libcore/intrinsics.rs
      /// Returns the square root of an `f32`
      pub fn sqrtf32(x: f32) -> f32;
      /// Returns the square root of an `f64`
-@@ -490,7 +493,9 @@
-     pub fn roundf32(x: f32) -> f32;
-     /// Returns the nearest integer to an `f64`. Rounds half-way cases away from zero.
-     pub fn roundf64(x: f64) -> f64;
+@@ -1198,8 +1201,9 @@
+     /// Float remainder that allows optimizations based on algebraic rules.
+     /// May assume inputs are finite.
+     pub fn frem_fast<T>(a: T, b: T) -> T;
 +}
  
+-
 +extern "rust-intrinsic" {
-     /// Returns the number of bits set in a `u8`.
-     pub fn ctpop8(x: u8) -> u8;
-     /// Returns the number of bits set in a `u16`.
+     /// Returns the number of bits set in an integer type `T`
+     pub fn ctpop<T>(x: T) -> T;
+ 
+Only in libcore/: intrinsics.rs.orig
+diff -rub libcore_orig/iter/traits.rs libcore/iter/traits.rs
+--- libcore_orig/iter/traits.rs	2017-11-11 10:43:12.110172653 +0800
++++ libcore/iter/traits.rs	2017-11-11 10:40:42.214064504 +0800
+@@ -764,6 +764,7 @@
+     );
+ }
+ 
++#[cfg(not(disable_float))]
+ macro_rules! float_sum_product {
+     ($($a:ident)*) => ($(
+         #[stable(feature = "iter_arith_traits", since = "1.12.0")]
+@@ -797,6 +798,7 @@
+ }
+ 
+ integer_sum_product! { i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize }
++#[cfg(not(disable_float))]
+ float_sum_product! { f32 f64 }
+ 
+ /// An iterator adapter that produces output as long as the underlying
+Only in libcore/iter: traits.rs.orig
+Only in libcore/iter: traits.rs.rej
 diff -rub libcore_orig/lib.rs libcore/lib.rs
---- libcore_orig/lib.rs	2015-09-22 19:09:25.174462098 +0800
-+++ libcore/lib.rs	2015-09-22 19:02:10.962704201 +0800
-@@ -115,7 +115,9 @@
- #[path = "num/u32.rs"]  pub mod u32;
- #[path = "num/u64.rs"]  pub mod u64;
+--- libcore_orig/lib.rs	2017-11-11 10:43:11.790141612 +0800
++++ libcore/lib.rs	2017-11-11 10:40:42.214064504 +0800
+@@ -140,7 +140,9 @@
+ #[path = "num/u64.rs"]   pub mod u64;
+ #[path = "num/u128.rs"]   pub mod u128;
  
 +#[cfg(not(disable_float))]
  #[path = "num/f32.rs"]   pub mod f32;
@@ -112,26 +108,19 @@ diff -rub libcore_orig/lib.rs libcore/lib.rs
  #[path = "num/f64.rs"]   pub mod f64;
  
  #[macro_use]
-@@ -159,6 +161,7 @@
- #[path = "simd_old.rs"]
- pub mod simd;
- #[cfg(not(stage0))]
-+#[cfg(not(disable_float))]
- pub mod simd;
- 
- pub mod slice;
+Only in libcore/: lib.rs.orig
 diff -rub libcore_orig/num/flt2dec/decoder.rs libcore/num/flt2dec/decoder.rs
---- libcore_orig/num/flt2dec/decoder.rs	2015-09-22 19:09:25.174462098 +0800
-+++ libcore/num/flt2dec/decoder.rs	2015-09-22 19:02:10.966704238 +0800
-@@ -12,6 +12,7 @@
+--- libcore_orig/num/flt2dec/decoder.rs	2017-11-11 10:43:12.026164512 +0800
++++ libcore/num/flt2dec/decoder.rs	2017-11-11 10:40:42.214064504 +0800
+@@ -10,6 +10,7 @@
  
- use prelude::v1::*;
+ //! Decodes a floating-point value into individual parts and error ranges.
  
 +#[cfg(not(disable_float))]
  use {f32, f64};
- use num::{Float, FpCategory};
- 
-@@ -57,10 +58,12 @@
+ use num::FpCategory;
+ use num::dec2flt::rawfp::RawFloat;
+@@ -56,10 +57,12 @@
      fn min_pos_norm_value() -> Self;
  }
  
@@ -145,165 +134,189 @@ diff -rub libcore_orig/num/flt2dec/decoder.rs libcore/num/flt2dec/decoder.rs
      fn min_pos_norm_value() -> Self { f64::MIN_POSITIVE }
  }
 diff -rub libcore_orig/num/mod.rs libcore/num/mod.rs
---- libcore_orig/num/mod.rs	2015-09-22 19:09:25.174462098 +0800
-+++ libcore/num/mod.rs	2015-09-22 19:02:10.966704238 +0800
-@@ -19,7 +19,7 @@
- use cmp::{Eq, PartialOrd};
- use fmt;
- use intrinsics;
--use marker::{Copy, Sized};
-+use marker::{Copy};
- use mem::size_of;
- use option::Option::{self, Some, None};
- use result::Result::{self, Ok, Err};
-@@ -45,7 +45,9 @@
- pub mod wrapping;
+--- libcore_orig/num/mod.rs	2017-11-11 10:43:11.850147435 +0800
++++ libcore/num/mod.rs	2017-11-11 10:42:40.419034954 +0800
+@@ -91,7 +91,9 @@
+ mod wrapping;
  
- // All these modules are technically private and only exposed for libcoretest:
+ // All these modules are technically private and only exposed for coretests:
 +#[cfg(not(disable_float))]
  pub mod flt2dec;
 +#[cfg(not(disable_float))]
  pub mod dec2flt;
  pub mod bignum;
  pub mod diy_float;
-@@ -100,6 +102,7 @@
-         }
-     )*)
- }
-+#[cfg(not(disable_float))]
- zero_one_impl_float! { f32 f64 }
- 
- macro_rules! checked_op {
-@@ -1266,6 +1269,7 @@
+@@ -2950,6 +2952,7 @@
  #[unstable(feature = "core_float",
             reason = "stable interface is via `impl f{32,64}` in later crates",
-            issue = "27702")]
+            issue = "32110")]
 +#[cfg(not(disable_float))]
  pub trait Float: Sized {
-     /// Returns the NaN value.
-     fn nan() -> Self;
-@@ -1469,4 +1473,5 @@
-     }
+     /// Returns `true` if this value is NaN and false otherwise.
+     #[stable(feature = "core", since = "1.6.0")]
+@@ -3394,6 +3397,7 @@
  }
  
+ #[stable(feature = "rust1", since = "1.0.0")]
 +#[cfg(not(disable_float))]
  pub use num::dec2flt::ParseFloatError;
+ 
+ // Conversion traits for primitive integer and float types
+@@ -3453,6 +3457,9 @@
+ // they fit in the significand, which is 24 bits in f32 and 53 bits in f64.
+ // Lossy float conversions are not implemented at this time.
+ 
++#[cfg(not(disable_float))]
++mod _int_flot_conv {
++use convert::From;
+ // Signed -> Float
+ impl_from! { i8, f32, #[stable(feature = "lossless_float_conv", since = "1.6.0")] }
+ impl_from! { i8, f64, #[stable(feature = "lossless_float_conv", since = "1.6.0")] }
+@@ -3469,6 +3476,7 @@
+ 
+ // Float -> Float
+ impl_from! { f32, f64, #[stable(feature = "lossless_float_conv", since = "1.6.0")] }
++}
+ 
+ static ASCII_LOWERCASE_MAP: [u8; 256] = [
+     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 Only in libcore/num: mod.rs.orig
-diff -rub libcore_orig/ops.rs libcore/ops.rs
---- libcore_orig/ops.rs	2015-09-22 19:09:25.174462098 +0800
-+++ libcore/ops.rs	2015-09-22 19:11:56.803704333 +0800
-@@ -203,7 +203,9 @@
+Only in libcore/num: .mod.rs.orig.swp
+Only in libcore/num: mod.rs.rej
+Only in libcore/num: .mod.rs.rej.swp
+Only in libcore/num: .mod.rs.swp
+diff -rub libcore_orig/ops/arith.rs libcore/ops/arith.rs
+--- libcore_orig/ops/arith.rs	2017-11-11 10:43:11.950157139 +0800
++++ libcore/ops/arith.rs	2017-11-11 10:40:42.218064980 +0800
+@@ -101,7 +101,9 @@
      )*)
  }
  
--add_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+add_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-add_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++add_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +add_impl! { f32 f64 }
  
- /// The `Sub` trait is used to specify the functionality of `-`.
+ /// The subtraction operator `-`.
  ///
-@@ -257,7 +259,9 @@
+@@ -196,7 +198,9 @@
      )*)
  }
  
--sub_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+sub_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++sub_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +sub_impl! { f32 f64 }
  
- /// The `Mul` trait is used to specify the functionality of `*`.
+ /// The multiplication operator `*`.
  ///
-@@ -311,7 +315,9 @@
+@@ -313,7 +317,9 @@
      )*)
  }
  
--mul_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+mul_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-mul_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++mul_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +mul_impl! { f32 f64 }
  
- /// The `Div` trait is used to specify the functionality of `/`.
+ /// The division operator `/`.
  ///
-@@ -383,6 +389,7 @@
+@@ -437,6 +443,7 @@
+ 
+ div_impl_integer! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
+ 
++#[cfg(not(disable_float))]
+ macro_rules! div_impl_float {
+     ($($t:ty)*) => ($(
+         #[stable(feature = "rust1", since = "1.0.0")]
+@@ -451,6 +458,7 @@
      )*)
  }
  
 +#[cfg(not(disable_float))]
  div_impl_float! { f32 f64 }
  
- /// The `Rem` trait is used to specify the functionality of `%`.
-@@ -457,6 +464,7 @@
+ /// The remainder operator `%`.
+@@ -520,6 +528,7 @@
+ rem_impl_integer! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
+ 
+ 
++#[cfg(not(disable_float))]
+ macro_rules! rem_impl_float {
+     ($($t:ty)*) => ($(
+         #[stable(feature = "rust1", since = "1.0.0")]
+@@ -534,6 +543,7 @@
+     )*)
  }
  
- #[cfg(not(stage0))]
 +#[cfg(not(disable_float))]
  rem_impl_float! { f32 f64 }
  
- #[stable(feature = "rust1", since = "1.0.0")]
-@@ -566,7 +574,9 @@
+ /// The unary negation operator `-`.
+@@ -614,7 +624,9 @@
  }
  
  // neg_impl_unsigned! { usize u8 u16 u32 u64 }
--neg_impl_numeric! { isize i8 i16 i32 i64 f32 f64 }
-+neg_impl_numeric! { isize i8 i16 i32 i64 }
+-neg_impl_numeric! { isize i8 i16 i32 i64 i128 f32 f64 }
++neg_impl_numeric! { isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +neg_impl_numeric! { f32 f64 }
  
- /// The `Not` trait is used to specify the functionality of unary `!`.
+ /// The addition assignment operator `+=`.
  ///
-@@ -974,7 +984,9 @@
+@@ -667,7 +679,9 @@
+     )+)
  }
  
- #[cfg(not(stage0))]
--add_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+add_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-add_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++add_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +add_assign_impl! { f32 f64 }
  
- /// The `SubAssign` trait is used to specify the functionality of `-=`.
+ /// The subtraction assignment operator `-=`.
  ///
-@@ -1023,7 +1035,9 @@
+@@ -720,7 +734,9 @@
+     )+)
  }
  
- #[cfg(not(stage0))]
--sub_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+sub_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-sub_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++sub_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +sub_assign_impl! { f32 f64 }
  
- /// The `MulAssign` trait is used to specify the functionality of `*=`.
+ /// The multiplication assignment operator `*=`.
  ///
-@@ -1072,7 +1086,9 @@
+@@ -764,7 +780,9 @@
+     )+)
  }
  
- #[cfg(not(stage0))]
--mul_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+mul_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-mul_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++mul_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +mul_assign_impl! { f32 f64 }
  
- /// The `DivAssign` trait is used to specify the functionality of `/=`.
+ /// The division assignment operator `/=`.
  ///
-@@ -1121,7 +1137,9 @@
+@@ -807,7 +825,9 @@
+     )+)
  }
  
- #[cfg(not(stage0))]
--div_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+div_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-div_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++div_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +div_assign_impl! { f32 f64 }
  
- /// The `RemAssign` trait is used to specify the functionality of `%=`.
+ /// The remainder assignment operator `%=`.
  ///
-@@ -1170,7 +1188,9 @@
+@@ -854,4 +874,6 @@
+     )+)
  }
  
- #[cfg(not(stage0))]
--rem_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
-+rem_assign_impl! { usize u8 u16 u32 u64 isize i8 i16 i32 i64 }
+-rem_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64 }
++rem_assign_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
 +#[cfg(not(disable_float))]
 +rem_assign_impl! { f32 f64 }
- 
- /// The `BitAndAssign` trait is used to specify the functionality of `&=`.
- ///
+Only in libcore/ops: arith.rs.orig
+Only in libcore/ops: arith.rs.rej
+Only in libcore_orig/: ops.rs
+Only in libcore_orig/: ops.rs.rej

@@ -6,10 +6,10 @@
 //!
 //! Provides a fixed-capacity ring buffer
 #[allow(unused_imports)]
-use prelude::*;
-use memory::heap::ArrayAlloc;
+use crate::prelude::*;
+use crate::memory::heap::ArrayAlloc;
 use core::sync::atomic::{AtomicUsize,Ordering};
-use sync::Spinlock;
+use crate::sync::Spinlock;
 
 /// Fixed-size ring buffer type
 pub struct RingBuf<T>
@@ -52,6 +52,46 @@ impl<T> RingBuf<T>
 
 	pub fn is_empty(&self) -> bool {
 		self.len == 0
+	}
+	pub fn capacity(&self) -> usize {
+		self.data.count()
+	}
+	pub fn len(&self) -> usize {
+		self.len
+	}
+	pub fn space(&self) -> usize {
+		self.data.count() - self.len
+	}
+
+	/// Obtain a contiguous slice of data from this buffer
+	pub fn get_slices(&mut self, range: ::core::ops::Range<usize>) -> (&[T], &[T]) {
+		// SAFE: Correct pointer accesses to initialised data
+		unsafe {
+			assert!(range.start <= self.len);
+			assert!(range.end <= self.len);
+			let len = range.len();
+			assert!(len <= self.len);
+			let tail_space = self.data.count() - self.start;
+			let head = self.len.saturating_sub(tail_space);
+			if range.start < tail_space {
+				if range.end < tail_space {
+					let s1 = ::core::slice::from_raw_parts(self.data.get_ptr(self.start + range.start), len);
+					let s2 = &[];
+					(s1, s2)
+				}
+				else {
+					let s1 = ::core::slice::from_raw_parts(self.data.get_ptr(self.start + range.start), tail_space);
+					let s2 = ::core::slice::from_raw_parts(self.data.get_ptr(0), len - tail_space);
+					(s1, s2)
+				}
+			}
+			else {
+				assert!(len < head);
+				let s1 = ::core::slice::from_raw_parts(self.data.get_ptr(range.start - tail_space), len);
+				let s2 = &[];
+				(s1,s2)
+			}
+		}
 	}
 
 	/// Push an item to the end of the buffer
@@ -97,7 +137,7 @@ impl<T> RingBuf<T>
 		}
 		else
 		{
-			// SAFE: No data effectively forotten
+			// SAFE: No data effectively forgotten
 			unsafe {
 				let idx = self.start;
 				self.start = self.int_get_idx(1);
@@ -121,12 +161,11 @@ impl<T: Send> AtomicRingBuf<T>
 		}
 	}
 	
-	#[tag_safe(irq)]
-	#[allow(not_tagged_safe)]	// Handles IRQ safety
+	//#[is_safe(irq)]	// Handles IRQ safety
 	/// Pop an item from the ring buffer
 	pub fn pop(&self) -> Option<T>
 	{
-		let _irql = ::sync::hold_interrupts();
+		let _irql = crate::sync::hold_interrupts();
 		let _lh = self.read_protector.lock();
 		
 		let idx = self.start.load(Ordering::Relaxed);
@@ -144,12 +183,11 @@ impl<T: Send> AtomicRingBuf<T>
 		}
 	}
 	
-	#[tag_safe(irq)]
-	#[allow(not_tagged_safe)]	// Handles IRQ safety
+	//#[is_safe(irq)]	// Handles IRQ safety
 	/// Push onto the end, returning Err(val) if full
 	pub fn push(&self, val: T) -> Result<(),T>
 	{
-		let _irql = ::sync::hold_interrupts();
+		let _irql = crate::sync::hold_interrupts();
 		let _lh = self.write_protector.lock();
 		
 		let pos = self.end.load(Ordering::Relaxed);
@@ -166,4 +204,19 @@ impl<T: Send> AtomicRingBuf<T>
 			Ok( () )
 		}
 	}
+}
+
+#[test]
+fn test_ring_basic()
+{
+	let mut r = RingBuf::<i32>::new(3);
+	r.push_back(1).expect("push_back");
+	r.push_back(2).expect("push_back");
+	r.push_back(3).expect("push_back");
+	assert_eq!(r.push_back(4), Err(4));
+	assert_eq!(r.pop_front(), Some(1));
+	assert_eq!(r.pop_front(), Some(2));
+	assert_eq!(r.pop_front(), Some(3));
+	assert_eq!(r.pop_front(), None);
+
 }

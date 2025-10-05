@@ -1,7 +1,12 @@
 ENTRY(start)
 
+/*SEARCH_DIR( .objs/amd64/libs )*/
+SEARCH_DIR( .output/amd64/libs )
+STARTUP( .objs/amd64/rustrt0.o )
+
 PHDRS {
 	SegRX PT_LOAD;
+	SegR PT_LOAD FLAGS(4);	/* 4 = PT_R */
 	SegRW PT_LOAD;
 	SegDYN PT_DYNAMIC;
 }
@@ -12,9 +17,22 @@ SECTIONS {
 	.text : {
 		*(.text .text.*)
 	} :SegRX
+	.plt : {
+		*(.plt)
+	} :SegRX
+
 	.rodata ALIGN(0x1000): {
 		*(.rodata .rodata.*)
-	} :SegRX
+	} :SegR
+	
+	/* Dynamic linking info */
+	.dynamic : { *(.dynamic) } :SegDYN :SegR
+	.dynsym : { *(.dynsym) } :SegDYN :SegR
+	.dynstr : { *(.dynstr) } :SegDYN :SegR
+	.rela.got : { *(.rela.got) } :SegDYN :SegR
+	.rela.dyn : { *(.rela.dyn) } :SegDYN :SegR
+	.rel.dyn : { *(.rel.dyn) } :SegDYN :SegR
+
 	. = ALIGN(0x1000);
 	.data ALIGN(0x1000): {
 		*(.data .data.*)
@@ -22,10 +40,5 @@ SECTIONS {
 	.bss ALIGN(0x1000) : {
 		*(.bss .bss.*)
 	} :SegRW
-	
-	. = 0;
-	.dynamic : {
-		*(.dynamic)
-	} :SegDYN
 }
 

@@ -1,17 +1,16 @@
-
-use lib::mem::Box;
-use threads::Thread;
+//! ARMv7 thread handling
 
 #[derive(Default)]
 pub struct State {
 	sp: usize,
 	ttbr0: u32,
-	stack_handle: Option< ::memory::virt::ArrayHandle<u8> >,
+	#[allow(dead_code)]
+	stack_handle: Option< crate::memory::virt::ArrayHandle<u8> >,
 }
 
 impl State
 {
-	pub fn new(address_space: &::memory::virt::AddressSpace) -> State {
+	pub fn new(address_space: &crate::memory::virt::AddressSpace) -> State {
 		State {
 			sp: 0,
 			ttbr0: address_space.inner().get_ttbr0(),
@@ -21,50 +20,82 @@ impl State
 }
 
 pub fn init_tid0_state() -> State {
-	State::default()
+	extern "C" {
+		static kernel_table0: crate::Extern;
+	}
+	State {
+		// SAFE: Just gets the address
+		ttbr0: crate::memory::virt::get_phys( unsafe { &kernel_table0 } ),
+		..State::default()
+		}
 }
 
-pub fn set_thread_ptr(thread: Box<Thread>) {
+pub fn init_smp() {
+	// TODO: Check for other cores in the FDT
+}
+
+// TODO: Returning an "owned" pointer here feels dirty (BUT - dropping ThreadPtr is a bug)
+pub fn get_idle_thread() -> crate::threads::ThreadPtr {
+	use ::core::sync::atomic::{Ordering,AtomicUsize};
+	// Get the per-CPU idle thread
+	// HACK: Single-CPU for now (should really store a per-CPU struct in TPIDRPRW[c13,c0,4]
+	static IDLE_THREAD: AtomicUsize = AtomicUsize::new(0);
+	let slot = &IDLE_THREAD;
+	// SAFE: Valid transmutes
+	unsafe
+	{
+		let mut ptr = slot.load(Ordering::Relaxed);
+		if ptr == 0
+		{
+			ptr = ::core::mem::transmute( crate::threads::new_idle_thread(0) );
+			slot.store(ptr, Ordering::Relaxed);
+		}
+		::core::mem::transmute(ptr)
+	}
+}
+
+pub fn set_thread_ptr(thread: crate::threads::ThreadPtr) {
 	let real = borrow_thread_mut();
-	let new = thread.into_raw();
 	if real.is_null() {
 		// SAFE: Valid ASM
-		unsafe { asm!("mcr p15,0, $0, c13,c0,4" : : "r" (new)); }
+		unsafe { ::core::arch::asm!("mcr p15,0, {0}, c13,c0,4", in(reg) thread.into_usize(), options(nomem, nostack, preserves_flags)); }
 	}
-	else if new == real {
-		// Welp, we've forgotten the pointer, so all is ready
+	else if real as *const _ == &*thread {
+		// Convert and discard
+		thread.into_usize();
 	}
 	else {
 		panic!("");
 	}
 }
-pub fn get_thread_ptr() -> Option<Box<::threads::Thread>> {
+pub fn get_thread_ptr() -> Option<crate::threads::ThreadPtr> {
 	// SAFE: Thread pointer should either be valid, or NULL
 	unsafe {
-		let cur = borrow_thread_mut();
-		if cur.is_null() {
+		let cur: usize;
+		::core::arch::asm!("mrc p15,0, {0}, c13,c0,4", lateout(reg) cur, options(pure, nomem, nostack, preserves_flags));
+		if cur == 0 {
 			None
 		}
 		else {
-			Some( Box::from_raw(cur) )
+			Some( crate::threads::ThreadPtr::from_usize(cur) )
 		}
 	}
 }
-fn borrow_thread_mut() -> *mut ::threads::Thread {
+fn borrow_thread_mut() -> *mut crate::threads::Thread {
 	// SAFE: Read-only access to the thread-local word
 	unsafe {
 		let ptr: usize;
-		asm!("mrc p15,0, $0, c13,c0,4" : "=r" (ptr));
-		ptr as *mut _
+		::core::arch::asm!("mrc p15,0, {0}, c13,c0,4", lateout(reg) ptr, options(pure, nomem, nostack, preserves_flags));
+		(ptr & !1) as *mut _
 	}
 }
-pub fn borrow_thread() -> *const ::threads::Thread {
+pub fn borrow_thread() -> *const crate::threads::Thread {
 	borrow_thread_mut() as *const _
 }
-pub fn switch_to(thread: Box<Thread>) {
+pub fn switch_to(thread: crate::threads::ThreadPtr) {
 	#[allow(improper_ctypes)]
 	extern "C" {
-		fn task_switch(old_sp: &mut usize, new_sp: usize, ttbr0: u32, thread_ptr: *mut Thread);
+		fn task_switch(old_sp: &mut usize, new_sp: usize, ttbr0: u32, thread_ptr: usize);
 	}
 	// SAFE: Pointer access is valid, task_switch should be too
 	unsafe
@@ -73,18 +104,21 @@ pub fn switch_to(thread: Box<Thread>) {
 		let new_sp = thread.cpu_state.sp;
 		let new_ttbr0 = thread.cpu_state.ttbr0;
 		log_trace!("Switching to SP={:#x},TTBR0={:#x}", new_sp, new_ttbr0);
-		task_switch(&mut outstate.sp, new_sp, new_ttbr0, thread.into_raw());
+		task_switch(&mut outstate.sp, new_sp, new_ttbr0, thread.into_usize());
 	}
 }
-pub fn idle() {
+pub fn idle(held_interrupts: crate::arch::sync::HeldInterrupts)
+{
 	log_trace!("idle");
 	// SAFE: Calls 'wait for interrupt'
 	unsafe {
-		asm!("wfi" : : : : "volatile");
+		::core::mem::forget(held_interrupts);
+		super::sync::start_interrupts();
+		::core::arch::asm!("wfi");
 	}
 }
 
-pub fn start_thread<F: FnOnce()+Send+'static>(thread: &mut ::threads::Thread, code: F) {
+pub fn start_thread<F: FnOnce()+Send+'static>(thread: &mut crate::threads::Thread, code: F) {
 	let mut stack = StackInit::new();
 
 	// 2. Populate stack with `code`
@@ -103,6 +137,8 @@ pub fn start_thread<F: FnOnce()+Send+'static>(thread: &mut ::threads::Thread, co
 	for _ in 4 .. 12+1 {
 		stack.push(0u32);
 	}
+	stack.push(0u32);	// User SP
+	stack.push(0u32);	// User LR
 	
 	// 4. Apply newly updated state
 	let (stack_handle, stack_pos) = stack.unwrap();
@@ -124,18 +160,18 @@ pub fn start_thread<F: FnOnce()+Send+'static>(thread: &mut ::threads::Thread, co
 }
 
 struct StackInit {
-	alloc: ::memory::virt::ArrayHandle<u8>,
+	alloc: crate::memory::virt::ArrayHandle<u8>,
 	top: usize,
 }
 impl StackInit {
 	fn new() -> StackInit {
-		let ah = ::memory::virt::alloc_stack().into_array::<u8>();
+		let ah = crate::memory::virt::alloc_stack().into_array::<u8>();
 		StackInit {
 			top: &ah[ah.len()-1] as *const _ as usize + 1,
 			alloc: ah,
 		}
 	}
-	fn unwrap(self) -> (::memory::virt::ArrayHandle<u8>, usize) {
+	fn unwrap(self) -> (crate::memory::virt::ArrayHandle<u8>, usize) {
 		(self.alloc, self.top)
 	}
 	fn push<T: 'static>(&mut self, v: T) {

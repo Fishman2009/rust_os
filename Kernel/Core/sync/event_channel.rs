@@ -4,33 +4,39 @@
 // Core/sync/event_channel.rs
 //! Sleeping primitive for that wakes a thread when signalled
 #[allow(unused_imports)]
-use prelude::*;
-use sync::Spinlock;
-use threads::WaitQueue;
+use crate::prelude::*;
+use crate::sync::Spinlock;
+use crate::threads::WaitQueue;
 use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering;
 
-/// EventChannel controlling object
+/// Sleep a thread until signaled 
 pub struct EventChannel
 {
+	/// Is there a pending event?
 	lock: Spinlock<bool>,
 	// Separate from the lock because WaitQueue::wait() takes a bool lock
 	queue: UnsafeCell< WaitQueue >,
+
+	/// Counter of how many wake requests have been issued with the queue locked
 	pending_wakes: ::core::sync::atomic::AtomicUsize,
 }
 unsafe impl Sync for EventChannel {}
-
-/// Static initialiser for EventChannel
-pub const EVENTCHANNEL_INIT: EventChannel = EventChannel {
-	lock: Spinlock::new( false ),
-	queue: UnsafeCell::new( ::threads::WAITQUEUE_INIT ),
-	pending_wakes: ::core::sync::atomic::ATOMIC_USIZE_INIT,
-	};
+impl Default for EventChannel {
+	fn default() -> Self {
+		EventChannel::new()
+	}
+}
 
 impl EventChannel
 {
-	pub fn new() -> EventChannel {
-		EVENTCHANNEL_INIT
+	/// Constant initialiser for EventChannel
+	pub const fn new() -> EventChannel {
+		EventChannel {
+			lock: Spinlock::new( false ),
+			queue: UnsafeCell::new( WaitQueue::new() ),
+			pending_wakes: ::core::sync::atomic::AtomicUsize::new(0),
+			}
 	}
 	
 	/// Sleep until an event
@@ -40,18 +46,26 @@ impl EventChannel
 			let mut lh = self.lock.lock();
 			// If an event has fired, clear it and don't sleep.
 			if *lh == true {
+				log_trace!("EventChannel::sleep() - ready");
 				*lh = false;
 			}
 			// Otherwise, sleep until after event
 			else {
+				log_trace!("EventChannel::sleep() - wait");
 				(*self.queue.get()).wait(lh);
 			}
 		}
 	}
 	
+	/// Clear any pending event
+	pub fn clear(&self) {
+		*self.lock.lock() = false;
+	}
+
 	/// Post the event
 	//#[tag_safe(irq)]	// SAFE: Handles case of lock being held by CPU
 	pub fn post(&self) {
+		log_trace!("EventChannel::post()");
 		// Attempt to lock (failing if the CPU already holds the lock)
 		if let Some(mut lh) = self.lock.try_lock_cpu() {
 			let mut count = 1;

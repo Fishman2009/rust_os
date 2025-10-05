@@ -11,34 +11,35 @@
 // > Display sink
 // > Serial sink
 #[allow(unused_imports)]
-use prelude::*;
-use core::fmt::{self,Write};
-use arch::sync::Spinlock;
+use crate::prelude::*;
+use core::fmt;
+use crate::arch::sync::Spinlock;
 
 /// Log level, ranging from a kernel panic down to tracing
+/// NOTE: Numbers must match what's used in `log_cfg.S`
+#[repr(u16)]
 #[derive(PartialEq,PartialOrd,Copy,Clone)]
 pub enum Level
 {
 	/// Everything broke
-	LevelPanic,
+	Panic = 0,
 	/// Something broke
-	LevelError,
+	Error = 1,
 	/// Recoverable
-	LevelWarning,
+	Warning = 2,
  	/// Odd
-	LevelNotice,
+	Notice = 3,
    	/// Interesting (least important for the user)
-	LevelInfo,
-		/// General (highest developer-only level)
-	LevelLog,
+	Info = 4,
+	/// General (highest developer-only level)
+	Log = 5,
    	/// What
-	LevelDebug,
+	Debug = 6,
   	/// Where
-	LevelTrace,
+	Trace = 7,
 }
 
-#[doc(hidden)]
-pub enum Colour
+enum Colour
 {
 	Default,
 	Red,
@@ -52,24 +53,52 @@ pub enum Colour
 #[doc(hidden)]
 pub struct LoggingFormatter<'a>
 {
-	lock_handle: ::arch::sync::HeldSpinlock<'a,Sinks>,
+	lock_handle: Option<crate::arch::sync::HeldSpinlock<'a,Sinks>>,
 	
 	// NOTE: Must be second, forcing interrupts to be reenabled after the lock is released
-	_irq_handle: ::arch::sync::HeldInterrupts,
+	_irq_handle: crate::arch::sync::HeldInterrupts,
 }
 
 /// Wrapper around a &-ptr that prints a hexdump of the passed data.
-pub struct HexDump<'a,T:'a>(pub &'a T);
+pub struct HexDump<'a,T: ?Sized + 'a>(pub &'a T);
 
 /// Wrapper around a `&[u8]` to print it as an escaped byte string
 pub struct RawString<'a>(pub &'a [u8]);
 
-static S_LOGGING_LOCK: Spinlock<Sinks> = Spinlock::new( Sinks { serial: serial::Sink, memory: None, video: None } );
+static S_LOGGING_LOCK: Spinlock<Sinks> = Spinlock::new( Sinks {
+	serial: serial::Sink,
+	memory: None,
+	video: None,
+	network: [const { None }; 4],
+} );
 
-trait Sink
+pub fn acquire_lock_cpu() -> Option<impl Sync> {
+	S_LOGGING_LOCK.try_lock_cpu()
+}
+pub fn register_gui(v: impl Sink+Send+Sync+'static) {
+	S_LOGGING_LOCK.lock().video = Some(video::Sink::new(v));
+}
+pub fn register_net(v: impl Sink+Send+Sync+'static) {
+	let Ok(v) = ::stack_dst::ValueA::new(v) else {
+		log_error!("register_net: Failure - doesn't fit in StackDST");
+		return ;
+	};
+	{
+		let mut lh = S_LOGGING_LOCK.lock();
+		for s in &mut lh.network {
+			if s.is_none() {
+				*s = Some(v);
+				return;
+			}
+		}
+	}
+	log_error!("register_net: Failure - no slots");
+}
+
+pub trait Sink
 {
 	/// Start a new log entry
-	fn start(&mut self, timestamp: ::time::TickCount, level: Level, source: &'static str);
+	fn start(&mut self, timestamp: crate::time::TickCount, level: Level, source: &'static str);
 	/// Append data to the current log entry
 	fn write(&mut self, data: &str);
 	/// End a log entry
@@ -80,51 +109,53 @@ struct Sinks
 	serial: serial::Sink,
 	memory: Option<memory::Sink>,
 	video: Option<video::Sink>,
+	network: [Option<::stack_dst::ValueA<dyn Sink + Send+Sync, [usize; 3]>>; 4],
 }
 
 mod serial
 {
 	#[allow(unused_imports)]
-	use prelude::*;
+	use crate::prelude::*;
 	use super::{Level,Colour};
 	use core::fmt;
 	
 	pub struct Sink;
 	impl super::Sink for Sink
 	{
-		fn start(&mut self, timestamp: ::time::TickCount, level: Level, source: &'static str) {
+		fn start(&mut self, timestamp: crate::time::TickCount, level: Level, source: &'static str) {
 			use core::fmt::Write;
 			self.set_colour(level.to_colour());
-			write!(self, "{:6}{} {}[{}] - ", timestamp, level, ::threads::get_thread_id(), source).unwrap();
+			write!(self, "{:6}{} {}/{}[{}] - ", timestamp, level, crate::arch::cpu_num(), crate::threads::get_thread_id(), source).unwrap();
 		}
 		fn write(&mut self, s: &str) {
-			::arch::puts(s);
+			crate::arch::puts(s);
 		}
 		fn end(&mut self) {
-			::arch::puts("\x1b[0m\n");
+			self.write("\x1b[0m\n");
 		}
 	}
 	impl fmt::Write for Sink
 	{
 		fn write_str(&mut self, s: &str) -> fmt::Result {
-			::arch::puts(s);
+			super::Sink::write(self, s);
 			Ok( () )
 		}
 	}
 	impl Sink
 	{
 		/// Set the output colour of the formatter
-		pub fn set_colour(&self, colour: Colour) {
-			match colour
-			{
-			Colour::Default => ::arch::puts("\x1b[0m"),
-			Colour::Red	 => ::arch::puts("\x1b[31m"),
-			Colour::Green   => ::arch::puts("\x1b[32m"),
-			Colour::Yellow  => ::arch::puts("\x1b[33m"),
-			Colour::Blue	=> ::arch::puts("\x1b[34m"),
-			Colour::Purple  => ::arch::puts("\x1b[35m"),
-			Colour::Grey	=> ::arch::puts("\x1b[1;30m"),
-			}
+		pub(super) fn set_colour(&mut self, colour: Colour) {
+			super::Sink::write(self, match colour
+				{
+				Colour::Default => "\x1b[0000m",
+				Colour::Red     => "\x1b[0031m",
+				Colour::Green   => "\x1b[0032m",
+				Colour::Yellow  => "\x1b[0033m",
+				Colour::Blue    => "\x1b[0034m",
+				Colour::Purple  => "\x1b[0035m",
+				//Colour::Grey    => "\x1b[1;30m",
+				Colour::Grey    => "\x1b[0000m",
+				});
 		}
 	}
 }
@@ -132,15 +163,15 @@ mod serial
 mod memory
 {
 	#[allow(unused_imports)]
-	use prelude::*;
+	use crate::prelude::*;
 	use super::Level;
 	
 	pub struct Sink
 	{
-		lines: ::lib::ring_buffer::RingBuf<LogMessage>,
+		lines: crate::lib::ring_buffer::RingBuf<LogMessage>,
 	}
 	// Buffer for log data
-	// Temp hack until type-level ints are avaliable
+	// Temp hack until type-level ints are available
 	struct LogDataBuf([u8;160]);
 	impl LogDataBuf {
 		fn new() -> LogDataBuf {
@@ -157,25 +188,25 @@ mod memory
 	#[allow(dead_code)]	// Allow unread fields
 	struct LogMessage
 	{
-		time: ::time::TickCount,
+		time: crate::time::TickCount,
 		level: Level,
 		source: &'static str,
-		data: ::lib::string::FixedString<LogDataBuf>,
+		data: crate::lib::FixedString<LogDataBuf>,
 	}
 	impl Sink
 	{
 		pub fn new() -> Sink {
 			Sink {
-				lines: ::lib::ring_buffer::RingBuf::new(256),	// 256 log of scrollback
+				lines: crate::lib::ring_buffer::RingBuf::new(256),	// 256 lines of scrollback
 			}
 		}
 	}
 	impl super::Sink for Sink
 	{
-		fn start(&mut self, timestamp: ::time::TickCount, level: Level, source: &'static str) {
+		fn start(&mut self, timestamp: crate::time::TickCount, level: Level, source: &'static str) {
 			let new_line = LogMessage {
 				time: timestamp, level: level, source: source,
-				data: ::lib::string::FixedString::new(LogDataBuf::new())
+				data: crate::lib::FixedString::new(LogDataBuf::new())
 				};
 			match self.lines.push_back( new_line )
 			{
@@ -194,28 +225,33 @@ mod memory
 	}
 }
 
-mod video
+pub mod video
 {
 	//use prelude::*;
 	use super::Level;
 	
-	pub struct Sink;
+	pub(super) struct Sink {
+		inner: ::stack_dst::ValueA<dyn super::Sink + Send + Sync, [usize; 8]>,
+	}
 	
+	impl Sink
+	{
+		pub fn new(v: impl super::Sink + Send + Sync + 'static) -> Sink {
+			Sink {
+			inner: ::stack_dst::ValueA::new(v).ok().expect("video::SinkInner was too big"),
+			}
+		}
+	}
 	impl super::Sink for Sink
 	{
-		fn start(&mut self, timestamp: ::time::TickCount, level: Level, source: &'static str) {
-			// Acquire a writer from the GUI
-			// - TODO: requires acquiring the lock on the kernel log, which is a Mutex, and may already be held.
-			// Write header
-			todo!("VideoSink - {} {} {}", timestamp, level, source);
+		fn start(&mut self, timestamp: crate::time::TickCount, level: Level, source: &'static str) {
+			self.inner.start(timestamp, level, source)
 		}
-		fn write(&mut self, s: &str) {
-			// Pass through
-			todo!("video::Sink::write - '{}'", s);
+		fn write(&mut self, data: &str) {
+			self.inner.write(data);
 		}
 		fn end(&mut self) {
-			// Drop writer (replace with None)
-			unimplemented!();
+			self.inner.end();
 		}
 	}
 }
@@ -226,27 +262,28 @@ impl Level
 	{
 		match *self
 		{
-		Level::LevelPanic   => 'k',
-		Level::LevelError   => 'e',
-		Level::LevelWarning => 'w',
-		Level::LevelNotice  => 'n',
-		Level::LevelInfo	=> 'i',
-		Level::LevelLog	 => 'l',
-		Level::LevelDebug   => 'd',
-		Level::LevelTrace   => 't',
+		Level::Panic   => 'k',
+		Level::Error   => 'e',
+		Level::Warning => 'w',
+		Level::Notice  => 'n',
+		Level::Info	=> 'i',
+		Level::Log	 => 'l',
+		Level::Debug   => 'd',
+		Level::Trace   => 't',
 		}
 	}
 	fn to_colour(&self) -> Colour
 	{
 		match *self
 		{
-		Level::LevelPanic   => Colour::Purple,
-		Level::LevelError   => Colour::Red,
-		Level::LevelWarning => Colour::Yellow,
-		Level::LevelNotice  => Colour::Green,
-		Level::LevelLog	 => Colour::Blue,
-		Level::LevelTrace   => Colour::Grey,
-		_ => Colour::Default,
+		Level::Panic   => Colour::Purple,
+		Level::Error   => Colour::Red,
+		Level::Warning => Colour::Yellow,
+		Level::Notice  => Colour::Green,
+		Level::Info    => Colour::Blue,
+		Level::Log	    => Colour::Default,
+		Level::Debug   => Colour::Default,
+		Level::Trace   => Colour::Grey,
 		}
 	}
 }
@@ -260,7 +297,7 @@ impl fmt::Display for Level
 
 impl Sinks
 {
-	pub fn foreach_mut<Fcn: FnMut(&mut Sink)>(&mut self, mut f: Fcn)
+	pub fn foreach_mut<Fcn: FnMut(&mut dyn Sink)>(&mut self, mut f: Fcn)
 	{
 		f(&mut self.serial);
 		self.memory.as_mut().map(|x| f(x));
@@ -271,14 +308,20 @@ impl Sinks
 impl<'a> LoggingFormatter<'a>
 {
 	/// Create a new logging formatter
+	//#[is_safe(irq)]	// SAFE: This lock holds interrupts, so can't interrupt itself.
 	pub fn new(level: Level, modname: &'static str) -> LoggingFormatter<'static>
 	{
+		// TODO: if S_LOGGING_LOCK is held by the current CPU, error (or just flag such that only serial can be used)
 		let mut rv = LoggingFormatter {
-				_irq_handle: ::arch::sync::hold_interrupts(),
-				lock_handle: S_LOGGING_LOCK.lock()
+				_irq_handle: crate::arch::sync::hold_interrupts(),
+				lock_handle: S_LOGGING_LOCK.try_lock_cpu()
 			};
-		let ts = ::time::ticks();
-		rv.lock_handle.foreach_mut(|x| x.start(ts, level, modname));
+		let ts = crate::time::ticks();
+		match rv.lock_handle
+		{
+		Some(ref mut v) => v.foreach_mut(|x| x.start(ts, level, modname)),
+		None => serial::Sink.start(ts, level, modname),
+		}
 		rv
 	}
 }
@@ -287,7 +330,10 @@ impl<'a> fmt::Write for LoggingFormatter<'a>
 {
 	fn write_str(&mut self, s: &str) -> fmt::Result
 	{
-		self.lock_handle.foreach_mut(|x| x.write(s));
+		match self.lock_handle {
+		Some(ref mut v) => v.foreach_mut(|x| x.write(s)),
+		None => serial::Sink.write(s),
+		}
 		Ok( () )
 	}
 }
@@ -295,32 +341,35 @@ impl<'a> ::core::ops::Drop for LoggingFormatter<'a>
 {
 	fn drop(&mut self)
 	{
-		self.lock_handle.foreach_mut(|x| x.end());
+		match self.lock_handle {
+		Some(ref mut v) => v.foreach_mut(|x| x.end()),
+		None => serial::Sink.end(),
+		}
 	}
 }
 
-impl<'a,T:'a> HexDump<'a,T>
+impl<'a, T: ?Sized + 'a> HexDump<'a,T>
 {
 	/// Return the wrapped type as a &[u8]
 	fn byteslice(&self) -> &[u8]
 	{
-		let size = ::core::mem::size_of::<T>();
+		let size = ::core::mem::size_of_val::<T>(&self.0);
 		// SAFE: Memory is valid, and cast is allowed
 		unsafe { ::core::slice::from_raw_parts( self.0 as *const T as *const u8, size ) }
 	}
 }
 
-impl<'a,T:'a> fmt::Debug for HexDump<'a,T>
+impl<'a, T: ?Sized + 'a> fmt::Debug for HexDump<'a,T>
 {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
 	{
 		let slice = self.byteslice();
-		try!(write!(f, "{} bytes: ", slice.len()));
+		write!(f, "{} bytes: ", slice.len())?;
 		for (idx,v) in slice.iter().enumerate()
 		{
-			try!(write!(f, "{:02x} ", *v));
+			write!(f, "{:02x} ", *v)?;
 			if idx % 16 == 15 {
-				try!(write!(f, "| "));
+				write!(f, "| ")?;
 			}
 		}
 		Ok( () )
@@ -330,19 +379,19 @@ impl<'a,T:'a> fmt::Debug for HexDump<'a,T>
 impl<'a> fmt::Debug for RawString<'a>
 {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		try!(write!(f, "b\""));
+		write!(f, "b\"")?;
 		for &b in self.0 {
 			match b
 			{
-			b'\t' => try!(write!(f, "\\t")),
-			b'\n' => try!(write!(f, "\\n")),
-			b'\\' => try!(write!(f, "\\\\")),
-			b'"' => try!(write!(f, "\\\"")),
-			32 ... 0x7E => try!(write!(f, "{}", b as char)),
-			_ => try!(write!(f, "\\x{:02x}", b)),
+			b'\t' => write!(f, "\\t")?,
+			b'\n' => write!(f, "\\n")?,
+			b'\\' => write!(f, "\\\\")?,
+			b'"'  => write!(f, "\\\"")?,
+			32 ..= 0x7E => write!(f, "{}", b as char)?,
+			_ => write!(f, "\\x{:02x}", b)?,
 			}
 		}
-		try!(write!(f, "\""));
+		write!(f, "\"")?;
 		Ok( () )
 	}
 }
@@ -353,35 +402,36 @@ impl<'a> fmt::Display for HexDumpBlk<'a>
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
 	{
 		assert!(self.0.len() <= 16);
-		for i in (0 .. 16)
+		for i in 0 .. 16
 		{
 			if i == 8 {
-				try!(write!(f, " "));
+				write!(f, " ")?;
 			}
+
 			if i < self.0.len() {
-				try!(write!(f, "{:02x} ", self.0[i]));
+				write!(f, "{:02x} ", self.0[i])?;
 			}
 			else {
-				try!(write!(f, "   "));
+				write!(f, "   ")?;
 			}
 			
 		}
-		try!(write!(f, "|"));
-		for i in (0 .. 16)
+		write!(f, "|")?;
+		for i in 0 .. 16
 		{
 			if i < self.0.len() {
-				try!(write!(f, "{}",
+				write!(f, "{}",
 					match self.0[i]
 					{
-					v @ 32 ... 0x7E => v as char,
+					v @ 32 ..= 0x7E => v as char,
 					_ => '.',
-					}));
+					})?;
 			}
 			else {
-				try!(write!(f, " "));
+				write!(f, " ")?;
 			}
 		}
-		try!(write!(f, "|"));
+		write!(f, "|")?;
 		Ok( () )
 	}
 }
@@ -409,16 +459,16 @@ macro_rules! print_iter_def {
 		{
 			fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
 				let mut i = self.0.borrow_mut().take().unwrap();
-				try!(write!(f, "["));
+				write!(f, "[")?;
 				if let Some(v) = i.next()
 				{
-					try!(v.fmt(f));
+					v.fmt(f)?;
 					for v in i {
-						try!(write!(f, ","));
-						try!(v.fmt(f));
+						write!(f, ",")?;
+						v.fmt(f)?;
 					}
 				}
-				try!(write!(f, "]"));
+				write!(f, "]")?;
 				Ok( () )
 			}
 		})*
@@ -429,7 +479,7 @@ print_iter_def! { LowerHex }
 pub fn start_memory_sink() {
 	let sink = memory::Sink::new();
 	
-	let _irq = ::arch::sync::hold_interrupts();
+	let _irq = crate::arch::sync::hold_interrupts();
 	let mut lh = S_LOGGING_LOCK.lock();
 	
 	if lh.memory.is_none()
@@ -438,25 +488,78 @@ pub fn start_memory_sink() {
 	}
 }
 
+#[repr(C)]
+struct LogCfgEnt {
+	name_ptr: *const u8,
+	name_len: u16,
+	level: u16,
+	#[cfg(target_pointer_width="64")]
+	_pad: u32,
+}
+// SAFE: Pointer is read-only
+unsafe impl Sync for LogCfgEnt {}
+
 #[doc(hidden)]
+#[inline(never)]	// This is semi-complex, so don't inline it everywhere
 /// Returns true if the passed combination of module and level is enabled
 pub fn enabled(level: Level, modname: &str) -> bool
 {
-	match modname
-	{
-	"kernel::memory::heap" => (level < Level::LevelDebug),	// Heap only prints higher than debug
-	"kernel::memory::phys" => (level < Level::LevelTrace),	// PMM only prints >Trace
-	"kernel::metadevs::storage" => (level < Level::LevelTrace),
-	"storage_ata::io" => (level < Level::LevelDebug),
-	"kernel::async" => (level < Level::LevelDebug),
-	"fs_fat" => (level < Level::LevelDebug),
-	_ => true,
+	if modname == "kernel::unwind" {
+		return true;
 	}
+
+	#[cfg(feature="test")]
+	mod _test_log {
+		macro_rules! def_filters {
+			( $($s:literal >= $level:ident,)* ) => {
+				#[no_mangle]
+				#[allow(non_upper_case_globals)]
+				static log_cfg_data: [super::LogCfgEnt; def_filters!(@count $($level)*)] = [
+					$(
+					super::LogCfgEnt {
+						name_ptr: $s.as_ptr(),
+						name_len: $s.len() as u16,
+						level: super::Level::$level as u16,
+						#[cfg(target_pointer_width="64")]
+						_pad: 0,
+						},
+					)*
+					];
+				#[no_mangle]
+				#[allow(non_upper_case_globals)]
+				static log_cfg_count: usize = def_filters!(@count $($level)*);
+			};
+			(@count $($level:ident)*) => { 0 $(+ { let _ = super::Level::$level; 1})* };
+		}
+		def_filters! {
+			"kernel::sync::rwlock" >= Debug,
+			"kernel::arch::test::threads" >= Log,
+			"kernel::threads::wait_queue" >= Debug,
+		}
+	}
+	// SAFE: Assembly defines these symbols, and I hope it gets the format right
+	let log_ents = unsafe {
+		extern "C" {
+			static log_cfg_data: [LogCfgEnt; 0];
+			static log_cfg_count: usize;
+		}
+		::core::slice::from_raw_parts(log_cfg_data.as_ptr(), log_cfg_count)
+		};
+
+	for ent in log_ents {
+		// SAFE: They're UTF-8 strings from assembly.
+		let ent_modname = unsafe { ::core::str::from_utf8_unchecked( ::core::slice::from_raw_parts(ent.name_ptr, ent.name_len as usize) ) };
+		if modname == ent_modname {
+			return (level as u16) < ent.level;
+		}
+	}
+
+	true
 }
 
 #[doc(hidden)]
 /// Returns a logging formatter
-pub fn getstream(level: Level, modname: &'static str) -> LoggingFormatter
+pub fn getstream(level: Level, modname: &'static str) -> LoggingFormatter<'static>
 {
 	assert!( enabled(level, modname) );
 	LoggingFormatter::new(level, modname)

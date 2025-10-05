@@ -4,8 +4,10 @@
 // Core/helpers/dma_buffer.rs
 ///! Helper type for DMA accesses
 #[allow(unused_imports)]
-use prelude::*;
-use arch::memory::PAddr;
+use crate::prelude::*;
+use crate::arch::memory::PAddr;
+use crate::PAGE_SIZE;
+use crate::memory::virt;
 use core::marker::PhantomData;
 
 /**
@@ -21,24 +23,30 @@ pub struct DMABuffer<'a>
 impl<'a> !Send for DMABuffer<'a> {}
 impl<'a> !Sync for DMABuffer<'a> {}
 
+impl<'a> ::core::fmt::Debug for DMABuffer<'a> {
+	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+		write!(f, "{:p}({:x})+{}", self.source_ptr, self.phys, self.buffer_len)
+	}
+}
+
 impl<'a> DMABuffer<'a>
 {
 	fn check_bits(src: &[u8], bits: u8) -> bool {
 		let vaddr = src.as_ptr() as usize;
-		let ofs = vaddr % ::PAGE_SIZE;
+		let ofs = vaddr % PAGE_SIZE;
 		
 		if bits as usize >= ::core::mem::size_of::<PAddr>()*8 {
 			return true;
 		}
-		if ::memory::virt::get_phys(src.as_ptr()) >> (bits as usize) != 0 {
+		if virt::get_phys(src.as_ptr()) >> (bits as usize) != 0 {
 			return false;
 		}
 		
-		if ::PAGE_SIZE - ofs < src.len()
+		if PAGE_SIZE - ofs < src.len()
 		{
-			for page in src[::PAGE_SIZE - ofs..].chunks(::PAGE_SIZE)
+			for page in src[PAGE_SIZE - ofs..].chunks(PAGE_SIZE)
 			{
-				let phys = ::memory::virt::get_phys(page.as_ptr());
+				let phys = virt::get_phys(page.as_ptr());
 				if phys >> (bits as usize) != 0 {
 					return false;
 				}
@@ -47,10 +55,10 @@ impl<'a> DMABuffer<'a>
 		true
 	}
 	
-	pub fn new_mut(src: &mut [u8], bits: u8) -> DMABuffer {
+	pub fn new_mut(src: &'a mut [u8], bits: u8) -> Self {
 		DMABuffer::new(src, bits)
 	}
-	pub fn new(src: &[u8], bits: u8) -> DMABuffer {
+	pub fn new(src: &'a [u8], bits: u8) -> Self {
 		if Self::check_bits(src, bits) == false {
 			todo!("new - Bounce because not within bit range");	
 		}
@@ -59,28 +67,27 @@ impl<'a> DMABuffer<'a>
 				_marker: PhantomData,
 				source_ptr: src.as_ptr() as *mut _,
 				buffer_len: src.len(),
-				phys: ::memory::virt::get_phys(src.as_ptr()),
+				phys: virt::get_phys(src.as_ptr()),
 			}
 		}
 	}
 	
-	/// Creates a new DMABuffer contigious in the specified region
-	pub fn new_contig_mut(src: &mut [u8], bits: u8) -> DMABuffer {
+	/// Creates a new DMABuffer contiguous in the specified region
+	pub fn new_contig_mut(src: &'a mut [u8], bits: u8) -> Self {
 		DMABuffer::new_contig(src, bits)
 	}
-	pub fn new_contig(src: &[u8], bits: u8) -> DMABuffer
+	pub fn new_contig(src: &'a [u8], bits: u8) -> Self
 	{
-		use arch::memory::PAddr;
 		let bytes = src.len();
-		let phys = ::memory::virt::get_phys( &src[0] );
-		let end_phys = ::memory::virt::get_phys( &src[src.len()-1] );
+		let phys = virt::get_phys( &src[0] );
+		let end_phys = virt::get_phys( &src[src.len()-1] );
 		// Check if the buffer is within the required bits
 		if Self::check_bits(src, bits) == false
 		{
 			todo!("new_contig - Bounce because not within bit range");	
 		}
-		// - Quick: If the data is smaller than a page worth, and falls on a contigious pair of pages
-		else if bytes <= ::PAGE_SIZE && phys + (bytes as PAddr)-1 == end_phys
+		// - Quick: If the data is smaller than a page worth, and falls on a contiguous pair of pages
+		else if bytes <= PAGE_SIZE && phys + (bytes as PAddr)-1 == end_phys
 		{
 			log_debug!("phys = {:#x}, source_slice={:p}", phys, &src[0]);
 			DMABuffer {
@@ -96,9 +103,9 @@ impl<'a> DMABuffer<'a>
 		}
 	}
 	
-	/// Returns an iterator over contigious physical ranges
-	pub fn phys_ranges(&self) -> Ranges {
-		if self.phys != ::memory::virt::get_phys(self.source_ptr) {
+	/// Returns an iterator over contiguous physical ranges
+	pub fn phys_ranges(&self) -> Ranges<'_> {
+		if self.phys != virt::get_phys(self.source_ptr) {
 			unimplemented!();
 		}
 		else {
@@ -118,7 +125,7 @@ impl<'a> DMABuffer<'a>
 	//}
 	
 	pub fn update_source(&mut self) {
-		if self.phys != ::memory::virt::get_phys(self.source_ptr) {
+		if self.phys != virt::get_phys(self.source_ptr) {
 			unimplemented!();
 		}
 	}
@@ -133,9 +140,9 @@ impl<'a> Iterator for Ranges<'a>
 			None
 		}
 		else {
-			let rem = ::PAGE_SIZE - (self.0.as_ptr() as usize) % ::PAGE_SIZE;
+			let rem = PAGE_SIZE - (self.0.as_ptr() as usize) % PAGE_SIZE;
 			let len = ::core::cmp::min(rem, self.0.len());
-			let paddr = ::memory::virt::get_phys(self.0.as_ptr());
+			let paddr = virt::get_phys(self.0.as_ptr());
 			self.0 = &self.0[len..];
 			Some( (paddr, len) )
 		}
@@ -151,16 +158,16 @@ impl<'a> DoubleEndedIterator for Ranges<'a>
 			let full_len = self.0.len();
 			// get phys of last byte
 			let lastp: *const u8 = &self.0[full_len-1];
-			let min_len = (lastp as usize) % ::PAGE_SIZE + 1;
+			let min_len = (lastp as usize) % PAGE_SIZE + 1;
 
 			let mut len = ::core::cmp::min(min_len, full_len);
-			let mut paddr = ::memory::virt::get_phys( &self.0[full_len - len] );
+			let mut paddr = virt::get_phys( &self.0[full_len - len] );
 
-			// Merge physically contigious pages
-			while len < full_len && ::memory::virt::get_phys(&self.0[full_len - len - 1]) == paddr - 1 {
-				if full_len - len > ::PAGE_SIZE {
-					paddr -= ::PAGE_SIZE as PAddr;
-					len += ::PAGE_SIZE;
+			// Merge physically contiguous pages
+			while len < full_len && virt::get_phys(&self.0[full_len - len - 1]) == paddr - 1 {
+				if full_len - len > PAGE_SIZE {
+					paddr -= PAGE_SIZE as PAddr;
+					len += PAGE_SIZE;
 				}
 				else {
 					paddr -= (full_len - len) as PAddr;

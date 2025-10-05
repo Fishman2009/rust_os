@@ -1,4 +1,7 @@
-#![feature(no_std,core_intrinsics)]
+// Tifflin OS - Usermode Macros
+// - By John Hodge (thePowersGang)
+//
+//! Provides a collection of helpful macros
 #![no_std]
 
 #[macro_export]
@@ -69,13 +72,9 @@ macro_rules! impl_from {
 	};
 }
 
-pub fn type_name<T: ?::core::marker::Sized>() -> &'static str {
-	// SAFE: Intrinsic with no sideeffect
-	unsafe { ::core::intrinsics::type_name::<T>() }
-}
 #[macro_export]
 macro_rules! type_name {
-	($t:ty) => ( $crate::type_name::<$t>() );
+	($t:ty) => ( ::core::any::type_name::<$t>() );
 }
 
 #[macro_export]

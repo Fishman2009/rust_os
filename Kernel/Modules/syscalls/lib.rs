@@ -3,44 +3,54 @@
 //
 // Core/syscalls/mod.rs
 //! Userland system-call interface
-#![feature(no_std)]
 #![no_std]
-#![feature(associated_consts)]
-#![feature(core_slice_ext,core_str_ext)]
-#![feature(reflect_marker)]
-
-#[macro_use]
-extern crate kernel;
-
-extern crate gui;
-
-extern crate stack_dst;
 
 #[allow(unused_imports)]
 use kernel::prelude::*;
-
 use kernel::memory::freeze::{Freeze,FreezeMut,FreezeError};
 
+use args::Args;
+
+#[macro_use]
+extern crate kernel;
+extern crate gui;
+extern crate stack_dst;
+extern crate syscall_values as values;
+use values::*;
+
 mod objects;
+mod args;
 
 mod threads;
 #[path="gui.rs"]
 mod gui_calls;
 mod vfs;
+mod ipc_calls;
+mod network_calls;
 
 pub type ObjectHandle = u32;
 
-#[allow(raw_pointer_derive)]
 #[derive(Debug)]
+/// Fatal syscall errors (will terminate the process)
 pub enum Error
 {
+	/// Unknown system call
 	UnknownCall,
+	/// Too many arguments requested by the call (indicates a kernel bug)
 	TooManyArgs,
+	/// An invalid value was passed
 	BadValue,
+	/// Invalid object index
 	NoSuchObject(u32),
+	/// Too many objects allocated
 	TooManyObjects,
+	/// User pssed a buffer that pointed to invalid memory
 	InvalidBuffer(*const (), usize),
+	/// User passed a buffer that was already in use by another call
 	BorrowFailure,
+	/// Attempt to call a moving syscall while another call is inprogress
+	MoveContention,
+	/// Invalid unicode data passed
 	InvalidUnicode(::core::str::Utf8Error),
 }
 impl From<::core::str::Utf8Error> for Error {
@@ -49,28 +59,52 @@ impl From<::core::str::Utf8Error> for Error {
 impl From<FreezeError> for Error {
 	fn from(_v: FreezeError) -> Self { Error::BorrowFailure }
 }
-
-#[no_mangle]
-pub unsafe extern "C" fn syscalls_handler(id: u32, first_arg: *const usize, count: u32) -> u64
-{
-	//log_debug!("syscalls_handler({}, {:p}+{})", id, first_arg, count);
-	invoke(id, ::core::slice::from_raw_parts(first_arg, count as usize))
+impl ::core::fmt::Display for Error {
+	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+		match *self
+		{
+		Error::UnknownCall => f.write_str("Unknown system call"),
+		Error::TooManyArgs => f.write_str("Too many arguments needed"),
+		Error::BadValue => f.write_str("Invalid value passed"),
+		Error::NoSuchObject(v) => write!(f, "Object {} is invalid", v),
+		Error::TooManyObjects => f.write_str("Out of object slots"),
+		Error::InvalidBuffer(p,s) => write!(f, "Buffer {:p}+{} wasn't valid", p, s),
+		Error::BorrowFailure => f.write_str("Contention on memory accesses"),
+		Error::MoveContention => f.write_str("Contention on object transfer"),
+		Error::InvalidUnicode(_) => f.write_str("Passed string wasn't valid unicode"),
+		}
+	}
 }
 
-/// Entrypoint invoked by the architecture-specific syscall handler
+/// Initialise PID0's handles
+pub fn init(init_handle: ::vfs::handle::File) {
+	vfs::init_handles(init_handle);
+	network_calls::init_handles();
+}
+
+#[no_mangle]
+/// Method called from architectue-specific (assembly) code
+pub unsafe extern "C" fn syscalls_handler(id: u32, first_arg: *const usize, count: u32) -> u64
+{
+	let args = ::core::slice::from_raw_parts(first_arg, count as usize);
+	//log_debug!("syscalls_handler({}, {:x?})", id, args);
+	invoke(id, args)
+}
+
 fn invoke(call_id: u32, args: &[usize]) -> u64 {
-	match invoke_int(call_id, args)
+	match invoke_int(call_id, &mut Args::new(args))
 	{
 	Ok(v) => v,
 	Err(e) => {
-		log_log!("Syscall formatting error in call {:#x} - {:?}", call_id, e);
-		!0
+		log_log!("Syscall formatting error in call {:#x} - {:?} {}", call_id, e, e);
+		::kernel::threads::exit_process(0x8000_0000);
+		// !0
 		},
 	}
 }
 
 fn error_code(value: u32) -> usize {
-	value as usize + usize::max_value() / 2
+	value as usize + (!0 / 2)
 }
 
 /// Pack a result into a u32
@@ -80,23 +114,40 @@ fn from_result<O: Into<u32>, E: Into<u32>>(r: Result<O,E>) -> u64 {
 	{
 	Ok(v) => {
 		let v: u32 = v.into();
-		assert!(v < 1<<31);
+		assert!(v < 1<<31, "Result value {:#x} from {} is above 2^31", v, type_name!(O));
 		v as u64
 		}
 	Err(e) => {
 		let v: u32 = e.into();
-		assert!(v < 1<<31);
+		assert!(v < 1<<31, "Result value {:#x} from {} is above 2^31", v, type_name!(E));
 		(1 << 31) | (v as u64)
 		},
 	}
 }
 
-use self::values::*;
-#[path="../../../syscalls.inc.rs"]
-mod values;
+#[cfg(feature="native")]
+pub mod native_exports {
+	pub use crate::args::Args;
+	pub mod values {
+		pub use ::syscall_values::*;
+	}
+	pub fn from_result<O: Into<u32>, E: Into<u32>>(r: Result<O,E>) -> u64 {
+		crate::from_result(r)
+	}
+	pub fn get_file_handle(obj: u32) -> Result<::vfs::handle::File, crate::Error> {
+		crate::vfs::get_file_handle(obj)
+	}
+	pub use crate::args::SyscallArg;
+	
+	pub use crate::objects::Object;
+	pub use crate::objects::new_object;
+	pub use crate::objects::give_object;
+	pub use crate::objects::object_has_no_such_method_ref;
+	pub use crate::objects::object_has_no_such_method_val;
+}
 
 #[inline(never)]
-fn invoke_int(call_id: u32, mut args: &[usize]) -> Result<u64,Error>
+fn invoke_int(call_id: u32, args: &mut Args) -> Result<u64,Error>
 {
 	if call_id & 1 << 31 == 0
 	{
@@ -107,59 +158,73 @@ fn invoke_int(call_id: u32, mut args: &[usize]) -> Result<u64,Error>
 		// === 0: Threads and core
 		// - 0/0: Userland log
 		CORE_LOGWRITE => {
-			let msg = try!( <Freeze<str>>::get_arg(&mut args) );
-			syscall_core_log(&msg); 0
+			let msg: Freeze<[u8]> = args.get()?;
+			syscall_core_log(&msg);
+			0
 			},
+		// - Userland debug
+		CORE_DBGVALUE => {
+			let msg: Freeze<[u8]> = args.get()?;
+			let val: usize = args.get()?;
+			syscall_core_dbgvalue(&msg, val); 0
+			},
+		// - Exit process
+		CORE_EXITPROCESS => {
+			let status: u32 = args.get()?;
+			threads::exit(status); 0
+			},
+		// - Generic information requests
 		CORE_TEXTINFO => {
-			let group = try!( <u32>::get_arg(&mut args) );
-			let id = try!( <usize>::get_arg(&mut args) );
-			let mut buf = try!( <FreezeMut<[u8]>>::get_arg(&mut args) );
+			let group: u32 = args.get()?;
+			let id: u32 = args.get()?;
+			let mut buf: FreezeMut<[u8]> = args.get()?;
 			// TODO: Use a Result here
 			syscall_core_textinfo(group, id, &mut buf) as u64
 			},
-		// - 0/1: Exit process
-		CORE_EXITPROCESS => {
-			let status = try!( <u32>::get_arg(&mut args) );
-			threads::exit(status); 0
-			},
-		// - 0/2: Terminate current thread
+		// - Terminate current thread
 		CORE_EXITTHREAD => {
 			threads::terminate(); 0
 			},
-		// - 0/3: Start process
+		// - Start process
 		CORE_STARTPROCESS => {
-			let ip = try!( <usize>::get_arg(&mut args) );
-			let sp = try!( <usize>::get_arg(&mut args) );
-			let start = try!( <usize>::get_arg(&mut args) );
-			let end   = try!( <usize>::get_arg(&mut args) );
+			let name: Freeze<str>  = args.get()?;
+			let start: usize = args.get()?;
+			let end  : usize = args.get()?;
 			if start > end || end > ::kernel::arch::memory::addresses::USER_END {
 				log_log!("CORE_STARTPROCESS - {:#x}--{:#x} invalid", start, end);
 				return Err( Error::BadValue );
 			}
-			threads::newprocess("TODO", ip, sp, start, end) as u64
+			threads::newprocess(&name, start, end) as u64
 			},
-		// - 0/4: Start thread
+		// - Start thread
 		CORE_STARTTHREAD => {
-			let ip = try!( <usize>::get_arg(&mut args) );
-			let sp = try!( <usize>::get_arg(&mut args) );
+			let ip: usize = args.get()?;
+			let sp: usize = args.get()?;
 			threads::newthread(sp, ip) as u64
 			},
-		// - 0/5: Wait for event
+		// - Wait for event
 		CORE_WAIT => {
-			let mut events = try!( <FreezeMut<[WaitItem]>>::get_arg(&mut args) );
-			let timeout = try!( <u64>::get_arg(&mut args) );
-			try!(threads::wait(&mut events, timeout)) as u64
+			let mut events: FreezeMut<[WaitItem]> = args.get()?;
+			let timeout: u64 = args.get()?;
+			threads::wait(&mut events, timeout)? as u64
+			},
+		CORE_SYSTEM_TICKS => ::kernel::time::ticks(),
+		CORE_FUTEX_SLEEP => {
+			todo!("FUTEX_SLEEP");
+			},
+		CORE_FUTEX_WAKE => {
+			todo!("FUTEX_SLEEP");
 			},
 		// === 1: Window Manager / GUI
 		// - 1/0: New group (requires permission, has other restrictions)
 		GUI_NEWGROUP => {
-			let name = try!( <Freeze<str>>::get_arg(&mut args) );
+			let name: Freeze<str> = args.get()?;
 			from_result(gui_calls::newgroup(&name))
 			},
 		// - 1/1: Bind group
 		GUI_BINDGROUP => {
-			let obj = try!( <u32>::get_arg(&mut args) );
-			if try!(gui_calls::bind_group(obj)) {
+			let obj: u32 = args.get()?;
+			if gui_calls::bind_group(obj)? {
 				1
 			}
 			else {
@@ -172,48 +237,30 @@ fn invoke_int(call_id: u32, mut args: &[usize]) -> Result<u64,Error>
 			},
 		// - 1/3: New window
 		GUI_NEWWINDOW => {
-			let name = try!( <Freeze<str>>::get_arg(&mut args) );
+			let name: Freeze<str> = args.get()?;
 			from_result(gui_calls::newwindow(&name))
 			},
-		// === 2: VFS
-		// - 2/0: Open node (for stat)
-		VFS_OPENNODE => {
-			let name = try!( <Freeze<[u8]>>::get_arg(&mut args) );
-			from_result( vfs::opennode(&name) )
-			},
-		// - 2/1: Open file
-		VFS_OPENFILE => {
-			let name = try!( <Freeze<[u8]>>::get_arg(&mut args) );
-			let mode = try!( <u8>::get_arg(&mut args) );
-			from_result( vfs::openfile(&name, mode) )
-			},
-		// - 2/2: Open directory
-		VFS_OPENDIR => {
-			let name = try!( <Freeze<[u8]>>::get_arg(&mut args) );
-			from_result( vfs::opendir(&name) )
-			},
-		// - 2/3: Open directory
-		VFS_OPENLINK => {
-			let name = try!( <Freeze<[u8]>>::get_arg(&mut args) );
-			from_result( vfs::openlink(&name) )
-			},
-		// === 3: Memory Mangement
+		// === 2: Memory Management
 		MEM_ALLOCATE => {
-			let addr = try!(<usize>::get_arg(&mut args));
-			let count = try!(<usize>::get_arg(&mut args));
-			// Wait? Why do I have a 'mode' here?
-			log_debug!("MEM_ALLOCATE({:#x},{})", addr, count);
-			::kernel::memory::virt::allocate_user(addr as *mut (), count); 0
-			//match ::kernel::memory::virt::allocate_user(addr as *mut (), count)
-			//{
-			//Ok(_) => 0,
-			//Err(e) => todo!("MEM_ALLOCATE - error {:?}", e),
-			//}
+			let addr: usize = args.get()?;
+			let count: usize = args.get()?;
+			log_debug!("MEM_ALLOCATE(@{:#x},{} pg)", addr, count);
+			if addr & (::kernel::PAGE_SIZE-1) != 0 {
+				return Err(Error::BadValue);
+			}
+			match ::kernel::memory::virt::allocate_user(addr as *mut (), count)
+			{
+			Ok(_) => 0,
+			Err(e) => todo!("MEM_ALLOCATE - error {:?}", e),
+			}
 			},
 		MEM_REPROTECT => {
-			let addr = try!(<usize>::get_arg(&mut args));
-			let mode = try!(<u8>::get_arg(&mut args));
+			let addr: usize = args.get()?;
+			let mode: u8 = args.get()?;
 			log_debug!("MEM_REPROTECT({:#x},{})", addr, mode);
+			if addr & (::kernel::PAGE_SIZE-1) != 0 {
+				return Err(Error::BadValue);
+			}
 			let mode = match mode
 				{
 				0 => ::kernel::memory::virt::ProtectionMode::UserRO,
@@ -230,13 +277,55 @@ fn invoke_int(call_id: u32, mut args: &[usize]) -> Result<u64,Error>
 			}
 			},
 		MEM_DEALLOCATE => {
-			let addr = try!(<usize>::get_arg(&mut args));
-			todo!("MEM_DEALLOCATE({:#x})", addr)
+			let addr: usize = args.get()?;
+			// SAFE: This internally does checks, but is marked as unsafe as a signal
+			match unsafe { ::kernel::memory::virt::reprotect_user(addr as *mut (), ::kernel::memory::virt::ProtectionMode::Unmapped) }
+			{
+			Ok( () ) => 0,
+			Err( () ) => error_code(0) as u64,
+			}
+			},
+		// === 3: IPC
+		IPC_NEWPAIR => {
+			match ipc_calls::new_pair()
+			{
+			Ok( (oh_a, oh_b) ) => oh_a as u64 | (oh_b as u64) << 32,
+			Err( () ) => !0
+			}
+			},
+		// === 4: Networking
+		NET_CONNECT => {
+			let local: ::syscall_values::SocketAddress = { let p: Freeze<_> = args.get()?; *p };
+			network_calls::new_client(local)?
+			},
+		NET_LISTEN => {
+			let local: ::syscall_values::SocketAddress = { let p: Freeze<_> = args.get()?; *p };
+			network_calls::new_server(local)?
+			},
+		NET_BIND => {
+			let local: ::syscall_values::SocketAddress = { let p: Freeze<_> = args.get()?; *p };
+			let remote: ::syscall_values::MaskedSocketAddress = { let p: Freeze<_> = args.get()?; *p };
+			network_calls::new_free_socket(local, remote)?
+			},
+		NET_ENUM_INTERFACES => {
+			let index = args.get()?;
+			let mut data: crate::FreezeMut<::syscall_values::NetworkInterface> = args.get()?;
+			network_calls::get_interface(NET_ENUM_INTERFACES { index, data: &mut data })
+			},
+		NET_ENUM_ADDRESS => {
+			let index: usize = args.get()?;
+			let mut data: ::kernel::memory::freeze::FreezeMut<::syscall_values::NetworkAddress> = args.get()?;
+			network_calls::get_address(NET_ENUM_ADDRESS { index, data: &mut data })?
+			},
+		NET_ENUM_ROUTE => {
+			let index: usize = args.get()?;
+			let mut data: ::kernel::memory::freeze::FreezeMut<::syscall_values::NetworkRoute> = args.get()?;
+			network_calls::get_route(NET_ENUM_ROUTE { index, data: &mut data })?
 			},
 		// === *: Default
 		_ => {
 			log_error!("Unknown syscall {:05x}", call_id);
-			0
+			!0
 			},
 		})
 	}
@@ -249,198 +338,69 @@ fn invoke_int(call_id: u32, mut args: &[usize]) -> Result<u64,Error>
 		// - Look up the object (first argument) and dispatch using registered methods
 		
 		// - Call method
-		if call_id == CALL_MASK {
+		match call_id as u16
+		{
+		0 ..= 0x3FD => {
+			objects::call_object_ref(handle_id, call_id as u16, args)
+			},
+		::syscall_values::OBJECT_CLONE => {
+			objects::clone_object(handle_id)
+			},
+		::syscall_values::OBJECT_GETCLASS => {
+			objects::get_class(handle_id)
+			},
+		0x400 ..= 0x7FE => {
+			// Call a method defined for the object class.
+			objects::call_object_val(handle_id, call_id as u16, args)
+			},
+		//::syscall_values::OBJECT_FORGET => objects::forget_object(handle_id),
+		::syscall_values::OBJECT_DROP => {
 			// Destroy object
 			objects::drop_object(handle_id);
 			Ok(0)
+			},
+		_ => unreachable!(),
 		}
-		else {
-			// Call a method defined for the object class?
-			objects::call_object(handle_id, call_id as u16, args)
-		}
-	}
-}
-
-trait SyscallArg: Sized {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error>;
-}
-
-// POD - Plain Old Data
-pub trait Pod { }
-impl Pod for u8 {}
-impl Pod for u32 {}
-impl Pod for values::WaitItem {}
-impl Pod for values::GuiEvent {}	// Kinda lies, but meh
-
-impl<T: Pod> SyscallArg for Freeze<[T]>
-{
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 2 {
-			return Err( Error::TooManyArgs );
-		}
-		let ptr = args[0] as *const T;
-		let len = args[1];
-		*args = &args[2..];
-		// SAFE: Performs data validation, and only accepts user pointers (which are checkable)
-		unsafe {
-			// 1. Check if the pointer is into user memory
-			// TODO: ^^^
-			// 2. Ensure that the pointed slice is valid (overlaps checks by Freeze, but gives a better error)
-			// TODO: Replace this check with mapping FreezeError
-			let bs = if let Some(v) = ::kernel::memory::buf_to_slice(ptr, len) {
-					v
-				} else {
-					return Err( Error::InvalidBuffer(ptr as *const (), len) );
-				};
-			// 3. Create a freeze on that memory (ensuring that it's not unmapped until the Freeze object drops)
-			Ok( try!(Freeze::new(bs)) )
-		}
-	}
-}
-impl SyscallArg for Freeze<str> {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		let ret = try!(Freeze::<[u8]>::get_arg(args));
-		// SAFE: Transmuting [u8] to str is valid if the str is valid UTF-8
-		unsafe { 
-			try!( ::core::str::from_utf8(&ret) );
-			Ok(::core::mem::transmute(ret))
-		}
-	}
-}
-impl<T: Pod> SyscallArg for FreezeMut<T>
-{
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 1 {
-			return Err( Error::TooManyArgs );
-		}
-		let ptr = args[0] as *mut T;
-
-		// SAFE: Performs data validation, and only accepts user pointers (which are checkable)
-		unsafe { 
-			// 3. Create a freeze on that memory (ensuring that it's not unmapped until the Freeze object drops)
-			Ok( try!(FreezeMut::new(&mut *ptr)) )
-		}
-	}
-}
-impl<T: Pod> SyscallArg for FreezeMut<[T]>
-{
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 2 {
-			return Err( Error::TooManyArgs );
-		}
-		let ptr = args[0] as *mut T;
-		let len = args[1];
-		*args = &args[2..];
-		// SAFE: Performs data validation, and only accepts user pointers (which are checkable)
-		unsafe { 
-			// 1. Check if the pointer is into user memory
-			// TODO: ^^^
-			// 2. Ensure that the pointed slice is valid (overlaps checks by Freeze, but gives a better error)
-			// TODO: Replace this check with mapping FreezeError
-			let bs =  if let Some(v) = ::kernel::memory::buf_to_slice_mut(ptr, len) {	
-					v
-				} else {
-					return Err( Error::InvalidBuffer(ptr as *const (), len) );
-				};
-			// 3. Create a freeze on that memory (ensuring that it's not unmapped until the Freeze object drops)
-			Ok( try!(FreezeMut::new(bs)) )
-		}
-	}
-}
-
-impl SyscallArg for usize {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 1 {
-			return Err( Error::TooManyArgs );
-		}
-		let rv = args[0];
-		*args = &args[1..];
-		Ok( rv )
-	}
-}
-#[cfg(target_pointer_width="64")]
-impl SyscallArg for u64 {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 1 {
-			return Err( Error::TooManyArgs );
-		}
-		let rv = args[0] as u64;
-		*args = &args[1..];
-		Ok( rv )
-	}
-}
-#[cfg(target_pointer_width="32")]
-impl SyscallArg for u64 {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 2 {
-			return Err( Error::TooManyArgs );
-		}
-		let rv = args[0] as u64 | (args[1] as u64) << 32;
-		*args = &args[2..];
-		Ok( rv )
-	}
-}
-
-impl SyscallArg for u32 {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 1 {
-			return Err( Error::TooManyArgs );
-		}
-		let rv = args[0] as u32;
-		*args = &args[1..];
-		Ok( rv )
-	}
-}
-impl SyscallArg for u16 {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 1 {
-			return Err( Error::TooManyArgs );
-		}
-		let rv = args[0] as u16;
-		*args = &args[1..];
-		Ok( rv )
-	}
-}
-impl SyscallArg for u8 {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 1 {
-			return Err( Error::TooManyArgs );
-		}
-		let rv = args[0] as u8;
-		*args = &args[1..];
-		Ok( rv )
-	}
-}
-impl SyscallArg for bool {
-	fn get_arg(args: &mut &[usize]) -> Result<Self,Error> {
-		if args.len() < 1 {
-			return Err( Error::TooManyArgs );
-		}
-		let rv = (args[0] as u8) != 0;
-		*args = &args[1..];
-		Ok( rv )
 	}
 }
 
 // TODO: Support a better user logging framework
 #[inline(never)]
-fn syscall_core_log(msg: &str) {
-	log_debug!("USER> {}", msg);
+fn syscall_core_log(msg: &[u8]) {
+	match ::core::str::from_utf8(msg)
+	{
+	Ok(v) => log_debug!("USER> {}", v),
+	Err(e) =>
+		log_debug!("USER [valid {}]> {:?}", e.valid_up_to(), ::kernel::lib::byte_str::ByteStr::new(msg)),
+	}
+}
+#[inline(never)]
+fn syscall_core_dbgvalue(msg: &[u8], val: usize) {
+	log_debug!("USER DBG> {} {:#x}", ::core::str::from_utf8(msg).unwrap_or("BADUTF"), val);
 }
 
 #[inline(never)]
-fn syscall_core_textinfo(group: u32, id: usize, buf: &mut [u8]) -> usize
+fn syscall_core_textinfo(group: u32, id: u32, buf: &mut [u8]) -> usize
 {
-	match group
+	match TextInfo::try_from(group)
 	{
-	::values::TEXTINFO_KERNEL =>
-		match id
-		{
-		0 => { buf.clone_from_slice( ::kernel::VERSION_STRING.as_bytes() ); ::kernel::VERSION_STRING.len() },
-		1 => { buf.clone_from_slice( ::kernel::BUILD_STRING.as_bytes() ); ::kernel::BUILD_STRING.len() },
-		_ => 0,
+	Ok(TextInfo::Kernel) => {
+		let s = match TextInfoKernel::try_from(id)
+			{
+			Ok(TextInfoKernel::Version) => ::kernel::build_info::version_string(),
+			Ok(TextInfoKernel::BuildString) => ::kernel::build_info::build_string(),
+			Err(_) => "",
+			};
+		let len = usize::min( s.len(), buf.len() );
+		buf[..len].clone_from_slice(&s.as_bytes()[..len]);
+		s.len()
 		},
-	_ => 0,
+	Ok(TextInfo::Network) =>
+		match TextInfoNetwork::try_from(id)
+		{
+		Err(_) => 0,
+		},
+	Err(_) => 0,
 	}
 }
 

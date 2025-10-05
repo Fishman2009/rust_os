@@ -1,0 +1,13 @@
+[package]
+name = "syscall_values"
+version = "0.0.0"
+edition = "2015"
+
+[lib]
+path = "syscall_values.rs"
+
+[dependencies]
+key_codes = { path = "../key_codes" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(arch, values("native"))'] }

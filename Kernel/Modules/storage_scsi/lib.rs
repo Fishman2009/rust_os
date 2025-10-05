@@ -2,16 +2,12 @@
 // - By John Hodge (thePowersGang)
 //
 // Modules/storage_scsi/lib.rs
-#![feature(no_std,linkage)]
-#![feature(core_slice_ext)]
-#![feature(associated_consts)]
+#![feature(linkage)]
 #![no_std]
-#![feature(num_bits_bytes)]
 #[macro_use] extern crate kernel;
 #[allow(unused_imports)]
 use kernel::prelude::*;
 
-use kernel::async;
 use kernel::metadevs::storage;
 
 pub mod proto;
@@ -26,7 +22,7 @@ pub trait ScsiInterface: Sync + Send + 'static
 #[derive(Debug)]
 enum VolumeClass
 {
-	Unknown(u8),
+	Unknown(#[allow(dead_code)] u8),
 	DirectAccessBlock,
 	Sequential,
 	CdDvd,
@@ -43,12 +39,19 @@ pub struct Volume<I: ScsiInterface>
 impl<I: ScsiInterface> Volume<I>
 {
 	fn recv_cmd<'a>(int: &I, cmd: &[u8], data: &'a mut [u8]) -> Result<(), storage::IoError> {
+		log_debug!("- cmd=[{:?}]", cmd);
+		match cmd[0] & 0xE0
+		{
+		0x00 => assert_eq!(cmd.len(), 6),
+		0x20 => assert_eq!(cmd.len(), 10),
+		0x40 => assert_eq!(cmd.len(), 10),
+		0xA0 => assert_eq!(cmd.len(), 12),
+		0x80 => assert_eq!(cmd.len(), 16),
+		_ => {},
+		}
+
 		let _size = {
-			let mut v = int.recv(cmd, data);
-			while !v.is_complete() {
-				::kernel::async::wait_on_list(&mut [v.as_waiter()], None);
-			}
-			try!(v.get_result().unwrap())
+			::kernel::futures::block_on(int.recv(cmd, data))?
 			};
 		Ok( () )
 	}
@@ -56,7 +59,7 @@ impl<I: ScsiInterface> Volume<I>
 		// 1. Request device type (INQUIRY)
 		let (class, removable) = {
 			let mut inq_data = proto::InquiryRsp::new();
-			try!( Self::recv_cmd(&int, proto::Inquiry::new(inq_data.len() as u16).as_ref(), inq_data.as_mut()) );
+			Self::recv_cmd(&int, proto::Inquiry::new(inq_data.len() as u16).as_ref(), inq_data.as_mut())?;
 			log_debug!("Type: {:#x}", inq_data.prehipheral_type());
 			
 			let class = match inq_data.prehipheral_type()
@@ -92,7 +95,7 @@ impl<I: ScsiInterface> Volume<I>
 			Err(e) => return Err(From::from(e)),
 			}
 			};
-		log_debug!("SCSI Volume {:?} size={:?}", class, size);
+		log_log!("SCSI Volume {} - class={:?} size={:?}", int.name(), class, size);
 		
 		Ok(Box::new( Volume {
 			int: int,
@@ -103,7 +106,7 @@ impl<I: ScsiInterface> Volume<I>
 }
 
 fn fits_in_bits(v: usize, bits: usize) -> bool {
-	if bits >= ::core::usize::BITS {
+	if bits >= ::core::mem::size_of::<usize>() * 8 {
 		true
 	}
 	else {
@@ -117,8 +120,9 @@ impl<I: ScsiInterface> storage::PhysicalVolume for Volume<I>
 	fn blocksize(&self) -> usize { self.size.expect("Calling blocksize on no-media volume").0 }
 	fn capacity(&self) -> Option<u64> { self.size.map(|x| x.1) }
 	
-	fn read<'a>(&'a self, _prio: u8, idx: u64, num: usize, dst: &'a mut [u8]) -> storage::AsyncIoResult<'a,()>
+	fn read<'a>(&'a self, _prio: u8, idx: u64, num: usize, dst: &'a mut [u8]) -> storage::AsyncIoResult<'a,usize>
 	{
+		Box::pin(async move {
 		// NOTE: Read6 commented out, as qemu's CD code doesn't support it
 		let rv = /*if idx < (1<<24) && num < (1 << 8) {
 				log_trace!("SCSI Read6");
@@ -135,20 +139,21 @@ impl<I: ScsiInterface> storage::PhysicalVolume for Volume<I>
 			else {
 				todo!("SCSI read out of range");
 			};
-		
-		// TODO: use when recv API is changed back to return the read byte count
-		//Box::new( rv.map(|x| x.map(|_| ())) )
-		rv
+		rv.await.map(|()| num)	
+		})
 	}
-	fn write<'s>(&'s self, _prio: u8, idx: u64, num: usize, src: &'s [u8]) -> storage::AsyncIoResult<'s,()> {
-		match self.class
-		{
-		VolumeClass::CdDvd => Box::new(async::NullResultWaiter::new( || Err(storage::IoError::ReadOnly) )),
-		VolumeClass::DirectAccessBlock => {
-			todo!("Volume::write(idx={},num={},len={})", idx, num, src.len());
-			},
-		_ => Box::new(async::NullResultWaiter::new( || Err(storage::IoError::Unknown("TODO: Write support")) )),
-		}
+	fn write<'s>(&'s self, _prio: u8, idx: u64, num: usize, src: &'s [u8]) -> storage::AsyncIoResult<'s,usize> {
+		Box::pin(async move {
+				
+			match self.class
+			{
+			VolumeClass::CdDvd => Err(storage::IoError::ReadOnly),
+			VolumeClass::DirectAccessBlock => {
+				todo!("Volume::write(idx={},num={},len={})", idx, num, src.len());
+				},
+			_ => Err(storage::IoError::Unknown("TODO: Write support")),
+			}
+		})
 	}
 	
 	fn wipe<'a>(&'a self, _blockidx: u64, _count: usize) -> storage::AsyncIoResult<'a,()>

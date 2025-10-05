@@ -1,0 +1,22 @@
+[workspace]
+members = [
+	"loader/bin",
+	"init",
+	"login",
+	"simple_console", "shell",
+	"filebrowser", "fileviewer",
+	"vfs_test",
+	"hello_world",
+
+	# Daemons
+	"handle_server",
+	"daemon_network",
+	
+	# Applications
+	"gui_irc",
+	"gui_http",
+	]
+exclude = ["loader/native"]
+
+[profile.release]
+debug = true

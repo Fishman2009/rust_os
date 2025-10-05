@@ -1,25 +1,35 @@
 
 const LOG_BUF_SIZE: usize = 256;
 
-struct FixedBuf
+pub struct FixedBuf
 {
 	len: usize,
 	data: [u8; LOG_BUF_SIZE],
 }
 impl FixedBuf {
-	const fn new() -> Self {
+	pub const fn new() -> Self {
 		FixedBuf { len: 0, data: [0; LOG_BUF_SIZE] }
 	}
 	fn clear(&mut self) {
 		self.len = 0;
 	}
 	fn push_back(&mut self, data: &[u8]) {
-		let len = self.data[self.len..].clone_from_slice( data );
-		self.len += len;
-		if len > LOG_BUF_SIZE {
-			self.len = 0;
-			assert!(self.len <= 128);
+		let buf = &mut self.data[self.len..];
+		if data.len() >= buf.len()
+		{
+			// Fill to max, then silently truncate
+			if buf.len() > 0
+			{
+				let ncopy = buf.len() - 1;
+				buf[..ncopy].clone_from_slice(&data[..ncopy]);
+				buf[ncopy] = b'$';
+				self.len = self.data.len();
+				::log_write("Pushed too much to FixedBuf" );
+			}
+			return ;
 		}
+		buf[..data.len()].clone_from_slice( data );
+		self.len += data.len();
 	}
 }
 impl ::core::ops::Deref for FixedBuf {
@@ -29,39 +39,31 @@ impl ::core::ops::Deref for FixedBuf {
 	}
 }
 
-//#[thread_local]
-static mut T_LOG_BUFFER: FixedBuf = FixedBuf::new();
-
 // A simple writer that uses the kernel-provided per-thread logging channel
-pub struct ThreadLogWriter;
-impl ::core::fmt::Write for ThreadLogWriter {
+pub struct ThreadLogWriter<'a>(&'a mut FixedBuf);
+impl<'a> ThreadLogWriter<'a> {
+	pub fn new(b: &'a mut FixedBuf) -> Self {
+		ThreadLogWriter(b)
+	}
+}
+impl<'a> ::core::fmt::Write for ThreadLogWriter<'a> {
 	fn write_str(&mut self, s: &str) -> ::core::fmt::Result {
-		// SAFE: Thread-local
-		unsafe {
-			T_LOG_BUFFER.push_back(s.as_bytes());
-		}
+		self.0.push_back(s.as_bytes());
 		Ok( () )
 	}
 }
-impl ::core::ops::Drop for ThreadLogWriter {
+impl<'a> ::core::ops::Drop for ThreadLogWriter<'a> {
 	fn drop(&mut self) {
-		// SAFE: Thread-local
-		unsafe {
-			let b = &*T_LOG_BUFFER;
-			match ::core::str::from_utf8(b)
-			{
-			Ok(v) => ::log_write(v),
-			Err(_) => {}
-			}
-			T_LOG_BUFFER.clear();
-		}
+		::log_write( &**self.0 );
+		self.0.clear();
 	}
 }
 
 #[inline(never)]
 #[doc(hidden)]
 pub fn write<F: ::core::ops::FnOnce(&mut ::logging::ThreadLogWriter)->::core::fmt::Result>(fcn: F) {
-	let _ = fcn(&mut ::logging::ThreadLogWriter);
+	let mut buffer = FixedBuf::new();
+	let _ = fcn(&mut ::logging::ThreadLogWriter(&mut buffer));
 }
 
 // NOTE: Calls the above function with a closure to prevent the caller's stack frame from balooning with the formatting junk

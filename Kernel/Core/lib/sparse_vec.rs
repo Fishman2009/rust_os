@@ -4,12 +4,12 @@
 // Core/lib/sparse_vec.rs
 //! Sparse vector type
 //!
-use prelude::*;
+use crate::prelude::*;
 use core::ops;
 
 /// Sparse vector type
 ///
-/// A wrapper around Vec<Option<T>> for use as a resource pool
+/// A wrapper around `Vec<Option<T>>` for use as a resource pool
 pub struct SparseVec<T>
 {
 	data: Vec<Option<T>>,
@@ -34,7 +34,7 @@ pub struct IterMut<'a,T: 'a>
 
 impl<T> SparseVec<T>
 {
-	pub fn new() -> SparseVec<T> {
+	pub const fn new() -> SparseVec<T> {
 		SparseVec { data: Vec::new(), count: 0 }
 	}
 
@@ -54,7 +54,7 @@ impl<T> SparseVec<T>
 	}
 	/// Remove the item at the specified location
 	pub fn remove(&mut self, idx: usize) {
-		if self.data[idx].is_some()
+		if idx < self.data.len() && self.data[idx].is_some()
 		{
 			self.data[idx] = None;
 			self.count -= 1;

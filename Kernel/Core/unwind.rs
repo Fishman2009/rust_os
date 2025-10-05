@@ -52,40 +52,34 @@ static EXCEPTION_CLASS : u64 = 0x544B3120_52757374;	// TK1 Rust (big endian)
 // */
 
 // Evil fail when doing unwind
-#[no_mangle] 
-#[lang = "panic_fmt"]
-//pub extern fn rust_begin_unwind(file: &'static str, line: usize, msg: &::core::fmt::Arguments) -> !
-//pub extern "C" fn rust_begin_unwind(msg: &::core::fmt::Arguments, file: &'static str, line: usize) -> !
-pub extern "C" fn rust_begin_unwind(msg: ::core::fmt::Arguments, file: &'static str, line: usize) -> !
+#[panic_handler]
+pub fn rust_begin_unwind(info: &::core::panic::PanicInfo) -> ! {
+	let file_line = match info.location()
+		{
+		Some(v) => (v.file(), v.line()),
+		None => ("", 0),
+		};
+	begin_panic_fmt(&info.message(), file_line)
+}
+fn begin_panic_fmt(msg: &impl ::core::fmt::Display, (file,line): (&str, u32)) -> !
 {
-	::arch::puts("\nERROR: rust_begin_unwind: ");
-	::arch::puts(file);
-	::arch::puts(":");
-	::arch::puth(line as u64);
-	::arch::puts("\n");
-	::arch::print_backtrace();
-	//log_debug!("msg={:?} file={:?} line={}", ::logging::HexDump(&msg), ::logging::HexDump(&file), line);
-	//log_panic!("rust_begin_unwind(file=\"{}\", line={}, msg=\"{:?}\")", file, line, msg);
-	log_panic!("{}:{}: Panicked \"{:?}\")", file, line, msg);
-	/*
-	// SAFE: Correctly calls extern function
-	unsafe {
-		let ex = box Exception {
-			cause: (),
-			header: _Unwind_Exception {
-				exception_class: EXCEPTION_CLASS,
-				exception_cleanup: cleanup,
-				private: [0,0],
-				}
-			};
-		let exptr: *const _Unwind_Exception = ::lib::mem::boxed::into_raw(ex);
-		log_trace!("exptr = {}", exptr);
-		_Unwind_RaiseException( exptr );
+	static NESTED: ::core::sync::atomic::AtomicBool = ::core::sync::atomic::AtomicBool::new(false);
+	// TODO: Get the arch code to freeze the other CPUs (using an IPI)
+	{
+		let _lh = crate::logging::acquire_lock_cpu();
+		crate::arch::puts("\nERROR: rust_begin_unwind: ");
+		crate::arch::puts(file);
+		crate::arch::puts(":");
+		crate::arch::puth(line as u64);
+		crate::arch::puts("\n");
+		if false && NESTED.swap(true, ::core::sync::atomic::Ordering::SeqCst) {
+			crate::arch::puts("NESTED!\n");
+			loop {}
+		}
 	}
-	
-	fn cleanup(urc: _Unwind_Reason_Code, exception: *const _Unwind_Exception) {
-	}
-	// */
+	crate::arch::print_backtrace();
+	log_panic!("{}:{}: Panicked \"{}\"", file, line, msg);
+	crate::metadevs::video::set_panic(file, line as usize, &format_args!("{}", msg));
 	loop{}
 }
 #[lang="eh_personality"]
@@ -105,8 +99,8 @@ fn rust_eh_personality(
 
 #[no_mangle] pub extern "C" fn abort() -> !
 {
-	::arch::puts("\nABORT ABORT ABORT\n");
-	::arch::print_backtrace();
+	crate::arch::puts("\nABORT ABORT ABORT\n");
+	crate::arch::print_backtrace();
 	loop {}
 }
 

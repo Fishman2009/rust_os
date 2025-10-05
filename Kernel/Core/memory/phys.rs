@@ -4,17 +4,27 @@
 // Core/memory/phys.rs
 // - Physical memory manager
 #[allow(unused_imports)]
-use prelude::*;
-//use arch::memory::addresses::{physinfo_start, physinfo_end};
-use arch::memory::PAddr;
+use crate::prelude::*;
+use crate::arch::memory::PAddr;
+use crate::arch::memory::virt::TempHandle;
+use crate::memory::phys_track;
+use crate::memory::virt;
+use crate::PAGE_SIZE;
 
 pub const NOPAGE : PAddr = 1;
 
-static S_MEM_MAP: ::lib::LazyStatic<&'static [::memory::MemoryMapEnt]> = lazystatic_init!();
+pub struct Error;
+impl_fmt! {
+	Debug(self,f) for Error {
+		write!(f, "phys::Error")
+	}
+}
+
+static S_MEM_MAP: crate::lib::LazyStatic<&'static [crate::memory::MemoryMapEnt]> = lazystatic_init!();
 /// Tracks the allocation point in S_MEM_MAP : (Entry Index, Address)
-static S_MAPALLOC : ::sync::Mutex<(usize,PAddr)> = mutex_init!( (0,0) );
+static S_MAPALLOC : crate::sync::Mutex<(usize,PAddr)> = mutex_init!( (0,0) );
 // TODO: Multiple stacks based on page colouring
-static S_FREE_STACK : ::sync::Mutex<PAddr> = mutex_init!( NOPAGE );
+static S_FREE_STACK : crate::sync::Mutex<PAddr> = mutex_init!( NOPAGE );
 // TODO: Reference counts (maybe require arch to expose that)
 
 /// A handle to a physical page (maintaining a reference to it, even when not mapped)
@@ -23,10 +33,8 @@ pub struct FrameHandle(PAddr);
 pub fn init()
 {
 	// 1. Acquire a memory map from the architecture code and save for use later
-	// SAFE: Called in a true single-threaded context
-	unsafe {
-		S_MEM_MAP.prep(|| ::arch::boot::get_memory_map());
-	}
+	assert!(!S_MEM_MAP.ls_is_valid(), "Double-call of init()");
+	S_MEM_MAP.prep(|| crate::arch::boot::get_memory_map());
 	
 	log_log!("Memory Map:");
 	let map = get_memory_map();
@@ -38,7 +46,7 @@ pub fn init()
 		log_log!("#{} : {:?}", i, ent);
 	}
 	let mut i = 0;
-	while i != map.len() && map[i].state != ::memory::memorymap::MemoryState::Free {
+	while i != map.len() && map[i].state != crate::memory::memorymap::MemoryState::Free {
 		i += 1;
 	}
 	if i == map.len() {
@@ -51,57 +59,93 @@ impl FrameHandle
 {
 	/// UNSAFE due to using a raw physical address
 	pub unsafe fn from_addr(addr: PAddr) -> FrameHandle {
-		mark_used(addr);
+		//mark_used(addr);
+		ref_frame(addr);
 		FrameHandle(addr)
 	}
-	/// UNSAFE due to using a raw physical address, and can cause a leak
+	/// UNSAFE due to using a raw physical address, and can cause an alias
 	pub unsafe fn from_addr_noref(addr: PAddr) -> FrameHandle {
 		FrameHandle(addr)
 	}
 	pub fn into_addr(self) -> PAddr {
-		self.0
+		let rv = self.0;
+		::core::mem::forget(self);
+		rv
+	}
+}
+impl Clone for FrameHandle
+{
+	fn clone(&self) -> FrameHandle {
+		ref_frame(self.0);
+		FrameHandle(self.0)
+	}
+}
+impl Drop for FrameHandle
+{
+	fn drop(&mut self)
+	{
+		// SAFE: This handle owns the allocation, and the backing mapping will be freed with the TempHandle free
+		unsafe {
+			deref_frame(self.0)
+		}
 	}
 }
 
-fn get_memory_map() -> &'static [::memory::MemoryMapEnt]
+fn get_memory_map() -> &'static [crate::memory::MemoryMapEnt]
 {
 	&*S_MEM_MAP
 }
 
-fn is_ram(phys: PAddr) -> bool
+fn phys_to_ram_frame(phys: PAddr) -> Option<u64>
 {
 	for e in S_MEM_MAP.iter()
 	{
 		if e.start as PAddr <= phys && phys < (e.start + e.size) as PAddr
 		{
-			return match e.state
+			let is_ram = match e.state
 				{
-				::memory::memorymap::MemoryState::Free => true,
-				::memory::memorymap::MemoryState::Used => true,
+				crate::memory::memorymap::MemoryState::Free => true,
+				crate::memory::memorymap::MemoryState::Used => true,
 				_ => false,
+				};
+			return if is_ram {
+					// TODO: Pack RAM (skipping holes)
+					Some(phys as u64 / PAGE_SIZE as u64)
+				}
+				else {
+					None
 				};
 		}
 	}
-	false
+	None
 }
 
-pub fn make_unique(page: PAddr) -> PAddr
+// TODO: Why does this take `page` instead of calling `get_phys`
+pub fn make_unique(page: PAddr, virt_addr: &[u8; PAGE_SIZE]) -> PAddr
 {
-	if !is_ram(page) {
-		panic!("Calling 'make_unique' on non-RAM page");
+	if let Some(frame) = phys_to_ram_frame(page)
+	{
+		if phys_track::get_multiref_count(frame) == 0 {
+			page
+		}
+		else {
+			// 1. Allocate a new frame in temp region
+			let mut new_frame = virt::alloc_free().expect("TODO: handle OOM in make_unique");
+			// 2. Copy in content of old frame
+			new_frame.clone_from_slice( virt_addr );
+			new_frame.into_frame().into_addr()
+		}
 	}
-	else if ::arch::memory::phys::get_multiref_count(page as u64 / ::PAGE_SIZE as u64) == 0 {
+	else
+	{
 		page
-	}
-	else {
-		todo!("make_unique");
 	}
 }
 
 pub fn allocate_range_bits(bits: u8, count: usize) -> PAddr
 {
 	// XXX: HACK! Falls back to the simple code if possible
-	if get_memory_map().last().unwrap().start >> bits == 0
+	if bits >= 64 || get_memory_map().last().unwrap().start >> bits == 0
 	{
 		return allocate_range(count);
 	}
@@ -110,7 +154,7 @@ pub fn allocate_range_bits(bits: u8, count: usize) -> PAddr
 	// NOTE: Memory map constructor _can_ break blocks up at common bitness boundaries (16, 24, 32 bits) to make this more efficient
 	// 2. Obtain `count` pages from either the end (if possible) or the start of this block
 	// TODO: If the block is not large enough, return an error (NOPAGE)
-	panic!("TODO: allocate_range(bits={}, count={})", bits, count);
+	panic!("TODO: allocate_range_bits(bits={}, count={})", bits, count);
 }
 
 pub fn allocate_range(count: usize) -> PAddr
@@ -124,10 +168,11 @@ pub fn allocate_range(count: usize) -> PAddr
 		log_error!("Out of physical memory");
 		return NOPAGE;
 	}
-	if addr + ::PAGE_SIZE as PAddr > map[i].end() as PAddr
+	// If there's less than one page left in the map entry, go to the next one
+	if addr + (1 * PAGE_SIZE) as PAddr > map[i].end() as PAddr
 	{
 		i += 1;
-		while i != map.len() && map[i].state != ::memory::memorymap::MemoryState::Free {
+		while i != map.len() && map[i].state != crate::memory::memorymap::MemoryState::Free {
 			i += 1;
 		}
 		if i == map.len() {
@@ -138,9 +183,11 @@ pub fn allocate_range(count: usize) -> PAddr
 		addr = map[i].start as PAddr;
 	}
 	let rv = addr;
-	let shift = (count * ::PAGE_SIZE) as PAddr;
+	let shift = (count * PAGE_SIZE) as PAddr;
 	if addr + shift > map[i].end() as PAddr {
-		todo!("Handle allocating from ahead in map ({:#x} + {:#x} > {:#x})", addr, shift, map[i].end());
+		let n_free = (map[i].end() as PAddr - rv) / (PAGE_SIZE as PAddr);
+		todo!("Handle allocating from ahead in map ({:#x} + {:#x} > {:#x}, start={:#x}) - nfree={} < count={}", addr, shift, map[i].end(), map[i].start, n_free, count);
+		// TODO: If the shift pushes this allocation over the edge of a map entry, stick the remaining entries onto the free stack and move to the next free block
 	}
 	addr += shift;
 	//log_trace!("allocate_range: rv={:#x}, i={}, addr={:#x}", rv, i, addr);
@@ -149,15 +196,22 @@ pub fn allocate_range(count: usize) -> PAddr
 	return rv;
 }
 
-pub fn allocate_bare() -> Result<PAddr, ()> {
-	allocate_int(None)
+/// Allocate a page with no fixed allocation, returns a temporary handle to it
+pub fn allocate_bare() -> Result<TempHandle<u8>, Error> {
+	allocate_int(None).map(|x| x.expect("Ok(None) from allocate_int when None passed"))
 }
 
+/// Allocate at a given address
 pub fn allocate(address: *mut ()) -> bool {
 	allocate_int(Some(address)).is_ok()
 }
 
-fn allocate_int( address: Option<*mut ()> ) -> Result<PAddr, ()>
+/// Allocate a page at the given (optional) address
+/// 
+/// If no address is provided, a temporary handle is returned
+/// 
+/// NOTE: Zeroes mapped memory
+fn allocate_int( address: Option<*mut ()> ) -> Result<Option<TempHandle<u8>>, Error>
 {
 	log_trace!("allocate(address={:?})", address);
 	// 1. Pop a page from the free stack
@@ -168,33 +222,36 @@ fn allocate_int( address: Option<*mut ()> ) -> Result<PAddr, ()>
 		let paddr = *h;
 		if paddr != NOPAGE
 		{
-			// If calling map on this address will not cause a recursive allocation
 			match address
 			{
 			Some(address) => {
-				if ::arch::memory::virt::can_map_without_alloc(address) {
+				// Check that calling `virt::map` will not cause us to be called
+				if crate::arch::memory::virt::can_map_without_alloc(address) {
 					// Map and obtain the next page
-					::memory::virt::map(address, paddr, super::virt::ProtectionMode::KernelRW);
+					virt::map(address, paddr, super::virt::ProtectionMode::KernelRW);
 					*h = *(address as *const PAddr);
 				}
 				else {
 					// Otherwise, do a temp mapping, extract the next page, then drop the lock and map
 					// NOTE: A race here doesn't matter, as lower operations are atomic, and it'd just be slower
-					::memory::virt::with_temp(paddr, |page| *h = *(&page[0] as *const u8 as *const PAddr));
+					virt::with_temp(paddr, |page| *h = *(&page[0] as *const u8 as *const PAddr));
 					drop(h);
-					::memory::virt::map(address, paddr, super::virt::ProtectionMode::KernelRW);
+					virt::map(address, paddr, super::virt::ProtectionMode::KernelRW);
 				}
-				//*(address as *mut PAddr) = 0;
-				*(address as *mut [u8; ::PAGE_SIZE]) = ::core::mem::zeroed();
+				*(address as *mut [u8; PAGE_SIZE]) = ::core::mem::zeroed();
 				log_trace!("- {:p} (stack) paddr = {:#x}", address, paddr);
+				mark_used(paddr);
+				return Ok(None);
 				},
 			None => {
-				::memory::virt::with_temp(paddr, |page| *h = *(&page[0] as *const u8 as *const PAddr));
+				let mut handle = crate::arch::memory::virt::TempHandle::new(paddr);
+				*h = *(&handle[0] as *const u8 as *const PAddr);
+				handle.fill(0);
 				log_trace!("- None (stack) paddr = {:#x}", paddr);
+				mark_used(paddr);
+				return Ok( Some(handle) );
 				},
 			}
-			mark_used(paddr);
-			return Ok(paddr);
 		}
 	}
 	// 2. If none, allocate from map
@@ -204,53 +261,74 @@ fn allocate_int( address: Option<*mut ()> ) -> Result<PAddr, ()>
 		if let Some(address) = address {
 			// SAFE: Physical address just allocated
 			unsafe {
-				::memory::virt::map(address, paddr, super::virt::ProtectionMode::KernelRW);
-				*(address as *mut [u8; ::PAGE_SIZE]) = ::core::mem::zeroed();
+				virt::map(address, paddr, super::virt::ProtectionMode::KernelRW);
+				*(address as *mut [u8; PAGE_SIZE]) = ::core::mem::zeroed();
 			}
 			log_trace!("- {:p} (range) paddr = {:#x}", address, paddr);
+			mark_used(paddr);
+			return Ok( None );
 		}
 		else {
 			log_trace!("- None (range) paddr = {:#x}", paddr);
+			mark_used(paddr);
+			// SAFE: Physical address was just allocated, can't alias
+			let mut handle = unsafe { crate::arch::memory::virt::TempHandle::new(paddr) };
+			handle.fill(0);
+			return Ok( Some(handle) );
 		}
-		return Ok(paddr);
 	}
 	// 3. Fail
-	log_trace!("- (none)");
-	Err( () )
+	log_warning!("Out of physical memory");
+	Err( Error )
 }
 
 pub fn ref_frame(paddr: PAddr)
 {
-	if ! is_ram(paddr) {
-		
+	if let Some(frame) = phys_to_ram_frame(paddr) {
+		phys_track::ref_frame(frame);
 	}
 	else {
-		::arch::memory::phys::ref_frame(paddr as u64 / ::PAGE_SIZE as u64);
+		// Ignore non-RAM frame
 	}
 }
-pub fn deref_frame(paddr: PAddr)
+// UNSAFE: This frees memory, so can cause use-after-free
+pub unsafe fn deref_frame(paddr: PAddr)
 {
-	if ! is_ram(paddr) {
-		log_log!("Calling deref_frame on non-RAM {:#x}", paddr);
-	}
-	// Dereference page (returns prevous value, zero meaning page was not multi-referenced)
-	else if ::arch::memory::phys::deref_frame(paddr as u64 / ::PAGE_SIZE as u64) == 0 {
-		// - This page is the only reference.
-		if ::arch::memory::phys::mark_free(paddr as u64 / ::PAGE_SIZE as u64) == true {
-			// Release frame back into the pool
-			todo!("deref_frame({:#x}) Release", paddr);
+	if let Some(frame) = phys_to_ram_frame(paddr) {
+		// Dereference page (returns previous value, zero meaning page was not multi-referenced)
+		if phys_track::deref_frame(frame) == 0 {
+			// - This page is the only reference.
+			if phys_track::mark_free(frame) == true {
+				// Release frame back into the pool
+				// SAFE: This frame is unaliased
+				let mut h = S_FREE_STACK.lock();
+				virt::with_temp(paddr, |page| *(page.as_mut_ptr() as *mut PAddr) = *h);
+				*h = paddr;
+			}
+			else {
+				// Page was either not allocated (oops) or is not managed
+				// - Either way, ignore
+				// TODO: Should an attempted free of a non-allocated frame trigger a panic/error/warning?
+			}
 		}
 		else {
-			// Page was either not allocated (oops) or is not managed
-			// - Either way, ignore
+			// References still exist
 		}
+	}
+	else {
+		// NOTE: Don't bother logging, as this can be called when unmapping hardware mappings
+		//log_log!("Calling deref_frame on non-RAM {:#x}", paddr);
 	}
 }
 
 fn mark_used(paddr: PAddr)
 {
-	log_error!("TODO: mark_used(paddr={:#x})", paddr);
-	// TODO:
+	// TODO: This causes a double-lock in the PMM (when the `phys_track` module tries to allocate
+	if false {
+		if let Some(frame) = phys_to_ram_frame(paddr) {
+			phys_track::mark_used(frame);
+		}
+	}
 }
 
 // vim: ft=rust

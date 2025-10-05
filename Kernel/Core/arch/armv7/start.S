@@ -21,8 +21,8 @@ ivt_svc:        ldr pc, =svc_handler	@ 0x08 SVC (used to be called SWI)
 ivt_prefetch:   ldr pc, =prefetch_abort	@ 0x0C Prefetch abort
 ivt_data:       ldr pc, =data_abort	@ 0x10 Data abort
 ivt_unused:     b .	@ 0x14 Not Used
-ivt_irq:        b .	@ 0x18 IRQ
-ivt_fiq:        b .	@ 0x1C FIQ (Fast interrupt)
+ivt_irq:        ldr pc, =irq_handler	@ 0x18 IRQ
+ivt_fiq:        ldr pc, =fiq_handler	@ 0x1C FIQ (Fast interrupt)
 
 rst_start:
 	ldr pc, = start-KERNEL_BASE
@@ -38,6 +38,8 @@ start:
 	teq r0, r13
 	beq 1f
 	@ TODO: What to do if we weren't loaded by our loader
+	@ - For now, we return
+	mov pc,lr
 	b .
 1:
 	@ R9: UART Address
@@ -164,6 +166,7 @@ ram_mapping_collision:
 @
 @ MAGIC MACRO
 @
+@ TODO: use https://sourceware.org/binutils/docs/as/ARM-Directives.html
 .macro EXIDX method handle
 .long EXIDX_\method
 .section .ARM.exidx.\method, #exidx
@@ -175,83 +178,81 @@ EXIDX_\method: .long \method - . - 0x80000000, \handle
 
 .section .text
 ENTRY(thread_trampoline)
+	.fnstart
+	.cantunwind
 	pop {r1}	@ "thread_root" (generic over closure type)
 	pop {r0}	@ Pop pointer to the closure
 	bx r1
+	.fnend
 @ R0: Old stack save location
 @ R1: New stack
 @ R2: New TTBR0
 @ R3: New Thread pointer
 ENTRY(task_switch)
+	.fnstart
+	.cantunwind
 	push {r4-r12,lr}
+	
+	mov r4, sp
+	cps #0x1F
+	stmfd r4!, {sp,lr}
+	cps #0x13
 
 	@ Save SP
-	str sp, [r0]
+	str r4, [r0]
 
 	@ Only update TTBR0 if the task has an explicit address space
-	tst r2, r2
+	movs r2, r2
 	mcrne p15,0, r2, c2,c0,0	@ Set TTBR0 to r2
-	@mov r2, #1
-	@mcrne p15,0, r2, c8,c7,0	@ TLBIALL - Invalid user space
+	mov r2, #1
+	mcrne p15,0, r2, c8,c7,0	@ TLBIALL - Invalid user space
 
 	@ Set new thread pointer
-	mcr p15, 0, r4, c13,c0,4	@ TPIDRPRW
+	mcr p15, 0, r3, c13,c0,4	@ TPIDRPRW
 
 	@ Set new SP
-	mov sp, r1
+	mov r4, r1
 
+	cps #0x1F
+	ldmfd r4!, {sp,lr}
+	cps #0x13
+	mov sp, r4
 	@ Restore state
 	pop {r4-r12,pc}
+	.fnend
 
 @ pub fn drop_to_user(entry: usize, stack: usize, cmdline_len: usize) -> !;
 @ R0: entry
 @ R1: stack
 @ R2: cmdline_len
 ENTRY(drop_to_user)
+	.fnstart
+	.cantunwind
 	cps #0x1F	@ Switch to "System" to set user SP
 	mov sp, r1
 	cps #0x13 	@ 0x13 = supervisor (kernel)
-	mov r1, #0x10
-	push {r0,r1}
-	mov r0, r2
+	mov r1, #0x10	@ -
+	push {r0,r1}	@ Push user entrypoint and operating mode (r1)
+	mov r0, r2	@ Set R0 = commandline length
 	rfefd sp!
+	.fnend
 
 
 ENTRY(prefetch_abort)
 	srsfd sp!, #0x17	@ Save state, using 'abort' mode stack
-	push {r0}
 	push {r0-r12}	@ SP, LR, and PC not pushed
 	
-	ldr r0, [sp, #4*13+4+4]
-	and r0, #0x1F
-	cmp r0, #0x10	@ 0x10 = user
-	cmpne r0, #0x13	@ 
-	bne not_known_mode
-	cmp r0, #0x10	@ 0x10 = user
-	beq 1f
-	cps #0x13 	@ 0x13 = supervisor (kernel)
-	mov r1, sp
-	mov r2, lr
-	b 2f
-1:
-	cps #0x1F 	@ 0x1F = "System" (user regs, kernel privs)
-	mov r1, sp
-	mov r2, lr
-2:
-	cps #23 	@ Switch back to abort mode
+	bl get_abort_sp_lr
+	push {r1,r2}	@ Source SP and LR
 	
-	push {r1,r2}	@ Push SP and LR
-	
-	mov r0, lr
+	ldr r0, [sp, #4*(2+13)]
 	sub r0, #8
 	mov r1, sp
 	mrc p15,0, r2, c5,c0,1
 	bl prefetch_abort_handler
-	
-	b .
-	
+
+	add sp, #8	@ Undo saving of SP/LR to stack
 	pop {r0-r12}
-	pop {r0}
 	rfefd sp!
 	.long EXIDX_prefetch_abort
 EXIDX prefetch_abort, prefetch_abort_EXTAB - . - 0x80000000
@@ -263,56 +264,82 @@ GLOBAL(prefetch_abort_EXTAB)
 .section .text
 
 ENTRY(data_abort)
+	.fnstart
+	.cantunwind
 	srsfd sp!, #0x17	@ Save state, using 'abort' mode stack
-	push {r0}
 	push {r0-r12}	@ SP, LR, and PC not pushed
 	
-	ldr r0, [sp, #4*13+4+4]
-	and r0, #0x1F
-	cmp r0, #0x10	@ 0x10 = user
-	cmpne r0, #0x13	@ 
-	bne not_known_mode
-	cmp r0, #0x10	@ 0x10 = user
-	beq 1f
-	cps #0x13 	@ 0x13 = supervisor (kernel)
-	mov r1, sp
-	mov r2, lr
-	b 2f
-1:
-	cps #0x1F 	@ 0x1F = "System" (user regs, kernel privs)
-	mov r1, sp
-	mov r2, lr
-2:
-	cps #23 	@ Switch back to abort mode
+	mov r3, lr
+	bl get_abort_sp_lr
+	push {r1,r2}	@ Source SP and LR
 	
-	push {r1,r2}	@ Push SP and LR
-	
-	mov r0, lr
+	ldr r0, [sp, #4*(2+13)]
 	sub r0, #8
 	mov r1, sp
 	mrc p15,0, r2, c6,c0,0
 	mrc p15,0, r3, c5,c0,0
 	bl data_abort_handler
-	
-	b .
-	
+
+	add sp, #8	@ Undo saving of SP/LR to stack
 	pop {r0-r12}
-	pop {r0}
 	rfefd sp!
-	.long EXIDX_data_abort
-not_known_mode:
+	.fnend
+
+ENTRY(ud_abort)
+	.fnstart
+	.cantunwind
+	srsfd sp!, #0x17	@ Save state, using 'abort' mode stack ([0]=LR_curr, [1]=SPSR)
+	cps #0x17	@ UD Abort is mode 0x1b, but that's an extra stack...
+	push {r0-r12}	@ SP, LR, and PC not pushed
+	
+	bl get_abort_sp_lr
+	push {r1,r2}	@ Source SP and LR
+	
+	ldr r0, [sp, #4*(2+13)]
+	sub r0, #4
+	mov r1, sp
+	bl ud_abort_handler
+	
+	add sp, #8	@ Undo saving of SP/LR to stack
+	pop {r0-r12}
+	rfefd sp!
+	.fnend
+
+get_abort_sp_lr:
+	ldr r0, [sp, #4*(13+1)]	@ 13 GPRs, LR, [SPSR]
+	and r0, #0x1F
+	cmp   r0, #0x10	@ 0x10 = user
+	cmpne r0, #0x13	@ 
+	cmpne r0, #0x17	@ 
+	bne 3f
+
+	cmp r0, #0x10	@ 0x10 = user
+	bne 1f
+	cps #0x1F 	@ 0x1F = "System" (user regs, kernel privs)
+	mov r1, sp
+	mov r2, lr
+	b 2f
+1:
+	cmp r0, #0x17	@ 0x17 = abort
+	bne 1f
+	sub r1, sp, #4*(13+2)
+	ldr r2, [sp, #13*4]
+	b 2f
+1:
+	cps #0x13 	@ 0x13 = supervisor (kernel)
+	mov r1, sp
+	mov r2, lr
+	@b 2f
+2:
+	cps #23 	@ Switch back to abort mode
+	bx lr
+3:
 	b .
-EXIDX data_abort, data_abort_EXTAB - . - 0x80000000
-.section .ARM.extab.data_abort
-GLOBAL(data_abort_EXTAB)
-	.long	0x81028600	@ POP {SP, LR}
-	.long	0x81FFB10F	@ POP {r4-r12}, POP {r0-r3}
-	.long	0x02B0B0B0	@ VSP+=12, END
-.section .text
-GLOBAL(ud_abort)
-	b .
-GLOBAL(svc_handler)
-	srsfd sp!, #19  @ Save state to stack
+
+ENTRY(svc_handler)
+	.fnstart
+	.cantunwind
+	srsfd sp!, #0x13  @ Save state to stack
 	push {r0-r5}
 	
 	mov r0, r12	@ R12 is the call ID
@@ -323,21 +350,43 @@ GLOBAL(svc_handler)
 	
 	add sp, #6*4
 	rfefd sp!
+	.fnend
 
-.section .text
-ENTRY(__aeabi_memcpy4)
-ENTRY(__aeabi_memcpy8)
-	movs r2, r2
-	bxeq lr
-1:
-	LDR r3, [r1], #4
-	STR r3, [r0], #4
-	SUBS r2, r2, #4
-	BGT 1b
-	BX lr
-EXIDX __aeabi_memcpy4, 0x80B0B0B0
+ENTRY(irq_handler)
+	.fnstart
+	.cantunwind
+	sub lr, #4	@ Adjust LR to the correct value
+	srsfd sp!, #0x13 @ Save state to supervisor stack
+	cps #0x13	@ TODO: Check if IRQs are still off aftert this
+	push {r0-r12}	@ Save GPRs
+	push {r0,r14}	@ Save kernel LR (and r0 again for alignment)
+	sub sp, #8
+	stm sp, {sp,lr}^	@ Save userland banked registers (can't write back)
+	
+	mov r0, sp
+	bl interrupt_handler
 
-ENTRY(__aeabi_memcpy)
+	ldmfd sp, {sp,lr}^	 @ Note: doesn't support write-back
+	add sp, #8
+	pop {r0,r14}
+	pop {r0-r12}
+	rfefd sp!
+	.fnend
+ENTRY(fiq_handler)
+	.fnstart
+	.cantunwind
+	srsfd sp!, #0x13 @ Save state to supervisor stack
+	cps #0x13
+	push {r0-r12}
+	
+	mov r0, sp
+	bl interrupt_handler
+	
+	pop {r0-r12}
+	rfefd sp!
+	.fnend
+
+ENTRY(memcpy)
 	movs r2, r2
 	bxeq lr
 1:
@@ -346,62 +395,43 @@ ENTRY(__aeabi_memcpy)
 	SUBS r2, r2, #1
 	BGT 1b
 	BX lr
-ENTRY(memcpy)
-	b __aeabi_memcpy
-EXIDX __aeabi_memcpy, 0x80B0B0B0
+EXIDX memcpy, 0x80B0B0B0
 
-ENTRY(__aeabi_memset4)
-ENTRY(__aeabi_memset8)
-	movs r1, r1
+ENTRY(memmove)
+	movs r2, r2
 	bxeq lr
-
-	LSL r3, r2, #8
-	ORR r2, r2, r3
-	LSL r3, r2, #16
-	ORR r2, r2, r3
-1:
-	STR r2, [r0], #4
-	SUBS r1, r1, #4
+	cmp r0,r1
+	blt __aeabi_memcpy	@ DST < SRC, memcpy
+	adds r3,r1,r2
+	cmp r0,r3
+	bgt __aeabi_memcpy	@ DST > SRC+NUM, memcpy
+	add r0,r2
+	add r1,r2
+1:	@ Reverse copy
+	LDRB r3, [r1,#-1]!
+	STRB r3, [r0,#-1]!
+	SUBS r2, r2, #1
 	BGT 1b
 	BX lr
-EXIDX __aeabi_memset4, 0x80B0B0B0
+EXIDX memmove, 0x80B0B0B0
 
-ENTRY(__aeabi_memclr4)
-ENTRY(__aeabi_memclr8)
-	MOV r2, #0
-	b 1b
-
-ENTRY(__aeabi_memset)
-	movs r1, r1
+ENTRY(memset)
+	.fnstart
+	movs r2, r2
 	beq 2f
 1:
-	strb r2, [r0], #1
-	subs r1, #1
+	strb r1, [r0], #1
+	subs r2, #1
 	bne 1b
 2:
 	bx lr
-ENTRY(memset)
-	b __aeabi_memset
-EXIDX __aeabi_memset, 0x80B0B0B0
-
-ENTRY(__aeabi_memclr)
-	MOV r2, #0
-	b __aeabi_memset
+	.fnend
 
 
-ENTRY(__aeabi_uldivmod)
-.extern __aeabi_uldivmod_
-	push {lr}
-	sub sp, #16
-	push {sp}
-	bl __aeabi_uldivmod_
-	add sp, #4
-	pop {r0, r1, r2, r3}
-	pop {pc}
-
-.globl memcmp
 // A, B, num
-memcmp:
+ENTRY(memcmp)
+	.fnstart
+	.save {r4}
 	push {r4}
 	movs r2,r2
 	mov r3, #0
@@ -416,17 +446,18 @@ memcmp:
 	bne 1b
 2:
 	movhs r0, #1
-	moveq r0, #0
 	movlo r0, #-1
+	moveq r0, #0
 	pop {r4}
 	mov pc, lr
-EXIDX memcmp, 0x80A0B0B0
+	.fnend
 
 ENTRY(__aeabi_unwind_cpp_pr0)
 ENTRY(__aeabi_unwind_cpp_pr1)
 	b .
 
 
+#if 0
 ENTRY(__aeabi_dcmplt)
 ENTRY(__aeabi_dcmple)
 ENTRY(__aeabi_dcmpeq)
@@ -439,7 +470,11 @@ ENTRY(__aeabi_fcmpeq)
 ENTRY(__aeabi_fcmpge)
 ENTRY(__aeabi_fcmpgt)
 	b .
+#endif
 EXIDX __aeabi_unwind_cpp_pr0, 0x1
+
+ENTRY(_Unwind_Resume)
+	b .
 
 .section .rodata
 data_abort_message:	.ascii "Data Abort: "
@@ -456,7 +491,8 @@ GLOBAL(ram_first_free)	.long	0
 GLOBAL(symbol_info_phys)	.long	0
 
 .section .bss
-	.space 0x2000, 0
+init_stack_base:
+	.space 0x20000, 0
 init_stack:
 	.space 0x1000, 0
 abort_stack:
@@ -468,28 +504,39 @@ abort_stack:
 
 kernel_table0:
 	.long 0x00000402	@ Identity map the first 1 MiB
-	.rept 0x800 - 1 - 4
+	.rept 0x800 - 1 - 8
 		.long 0
 	.endr
-	.long user_last_map - KERNEL_BASE + 0x000 + 1
-	.long user_last_map - KERNEL_BASE + 0x400 + 1
-	.long user_last_map - KERNEL_BASE + 0x800 + 1
-	.long user_last_map - KERNEL_BASE + 0xC00 + 1
+	.long user_last_map - KERNEL_BASE + 0x0000 + 1
+	.long user_last_map - KERNEL_BASE + 0x0400 + 1
+	.long user_last_map - KERNEL_BASE + 0x0800 + 1
+	.long user_last_map - KERNEL_BASE + 0x0C00 + 1
+	.long user_last_map - KERNEL_BASE + 0x1000 + 1
+	.long user_last_map - KERNEL_BASE + 0x1400 + 1
+	.long user_last_map - KERNEL_BASE + 0x1800 + 1
+	.long user_last_map - KERNEL_BASE + 0x1C00 + 1
 	@ 0x80000000 - User/Kernel split
-	.long 0x00000000 + 0x402	@ Map first 4 MiB to 2GiB (KRW only)
+	.long 0x00000000 + 0x402	@ Map first 8 MiB to 2GiB (KRW only)
 	.long 0x00100000 + 0x402 	@ 
 	.long 0x00200000 + 0x402	@ 
 	.long 0x00300000 + 0x402	@ 
-	.rept 0xF00 - 0x800 - 4
+	.long 0x00400000 + 0x402	@ 
+	.long 0x00500000 + 0x402 	@ 
+	.long 0x00600000 + 0x402	@ 
+	.long 0x00700000 + 0x402	@ 
+	.rept 0xF00 - 0x800 - 8
 		.long 0
 	.endr
+	@  - 0xF00_00000
 	.rept 16
 		.long 0
 	.endr
+	@  - 0xF10_00000
 	.long hwmap_table_0 - KERNEL_BASE + 0x000 + 1
 	.long hwmap_table_0 - KERNEL_BASE + 0x400 + 1
 	.long hwmap_table_0 - KERNEL_BASE + 0x800 + 1
 	.long hwmap_table_0 - KERNEL_BASE + 0xC00 + 1
+	@  - 0xF14_00000
 	.rept 0xFF8 - 0xF00 - 16 - 4
 		.long 0
 	.endr
@@ -501,10 +548,15 @@ kernel_table0:
 	.long kernel_exception_map - KERNEL_BASE + 0xC00 + 1
 
 user_last_map:
-	.rept 1024-3
+	.rept 1024
 		.long 0
 	.endr
-	.long user_last_map - KERNEL_BASE + 0x13
+	@ - 4MB for the kernel's use, 1020 places for temp table mappings
+	.rept 1024-4
+		.long 0
+	.endr
+	.long user_last_map - KERNEL_BASE + 0x0000 + 0x13
+	.long user_last_map - KERNEL_BASE + 0x1000 + 0x13
 	.long kernel_table0 - KERNEL_BASE + 0x0000 + 0x13
 	.long kernel_table0 - KERNEL_BASE + 0x1000 + 0x13
 
@@ -520,8 +572,8 @@ kernel_exception_map:
 	.rept 1024-16
 		.long 0
 	.endr
-	.long 0x00000000 + 0x212	@ Exceptions at 0xFFFF0000, re-map first page (TODO: Mangle this with load base instead)
-	.rept 16-1
+	.long 0x00000000 + 0x212	@ Exceptions at 0xFFFF0000, re-map first page
+	.rept 16-1-1
 		.long 0
 	.endr
 	.long 0	@ ALWAYS zero, to catch NULL-1 indexing

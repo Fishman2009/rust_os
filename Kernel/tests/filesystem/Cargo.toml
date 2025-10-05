@@ -1,0 +1,24 @@
+[package]
+name = "kernel-test-filesystem"
+version = "0.1.0"
+authors = ["John Hodge <tpg@mutabah.net>"]
+edition = "2018"
+
+#[lib]
+#doctest = false
+
+[dependencies]
+bitvec = "0.17"
+crc = "3"
+compressed_file = { path = "compressed_file" }
+cmdline_words_parser = { path = "../../../externals/crates.io/cmdline_words_parser" }
+
+kernel = { path = "../../Core", features = ["test"] }
+vfs = { path = "../../Modules/vfs" }
+fs_ext_n = { path = "../../Modules/fs_extN" }
+fs_fat = { path = "../../Modules/fs_fat" }
+fs_iso9660 = { path = "../../Modules/fs_iso9660" }
+fs_ntfs = { path = "../../Modules/fs_ntfs" }
+
+[build-dependencies]
+my_dependencies = { git = "https://github.com/thepowersgang/my-dependencies-rs.git" }

@@ -1,15 +1,19 @@
 //
 //
 //
-use arch::memory::{VAddr};
-use core::option::Option::{self,None,Some};
+use crate::arch::memory::{VAddr};
 
 pub use self::memorymap::{MAP_PAD, MemoryMapEnt, MemoryMapBuilder};
 pub use self::memorymap::MemoryState;
 
 pub mod phys;
+mod phys_track;
+
 pub mod virt;
+#[cfg_attr(feature="test", path="heap-test.rs")]
 pub mod heap;
+// TODO: Merge user and freeze
+pub mod user;
 
 pub mod freeze;
 
@@ -17,13 +21,21 @@ pub mod helpers;
 
 pub mod memorymap;
 
-pub use arch::memory::PAddr;
+pub mod bump_region;
+pub mod page_cache;
+pub mod page_array;
+
+pub use crate::arch::memory::PAddr;
+
 /*
 #[derive(Copy,Clone,Debug)]
 pub struct PAddr(::arch::memory::PAddrRaw);
 impl PAddr {
-	fn as_inner() -> ::arch::memory::PAddrRaw {
+	pub fn as_inner(self) -> ::arch::memory::PAddrRaw {
 		self.0
+	}
+	pub fn to_u32(&self) -> Option<u32> {
+		self.0.try_into()
 	}
 }
 impl ::core::ops::Add<usize> for PAddr
@@ -48,7 +60,7 @@ impl ::core::ops::Sub<PAddr> for PAddr {
 pub unsafe fn c_string_as_byte_slice<'a>(c_str: *const i8) -> Option<&'a [u8]>
 {
 	// 1. Check first page
-	if ! ::arch::memory::virt::is_reserved(c_str) {
+	if ! crate::arch::memory::virt::is_reserved(c_str) {
 		return None;
 	}
 	
@@ -56,9 +68,9 @@ pub unsafe fn c_string_as_byte_slice<'a>(c_str: *const i8) -> Option<&'a [u8]>
 	while *ptr != 0
 	{
 		ptr = ptr.offset(1);
-		if ptr as usize % ::PAGE_SIZE == 0
+		if ptr as usize % crate::PAGE_SIZE == 0
 		{
-			if ! ::arch::memory::virt::is_reserved(ptr) {
+			if ! crate::arch::memory::virt::is_reserved(ptr) {
 				return None;
 			}
 		}
@@ -76,7 +88,6 @@ pub fn c_string_valid(c_str: *const i8) -> bool
 
 // UNSAFE: Lifetime is inferred, and memory must point to a valid T instance
 pub unsafe fn buf_to_slice<'a, T>(ptr: *const T, size: usize) -> Option<&'a [T]> {
-	
 	if size > 0 && ptr as usize % ::core::mem::align_of::<T>() != 0 {
 		None
 	}
@@ -114,10 +125,10 @@ pub fn buf_valid(ptr: *const (), mut size: usize) -> bool
 			return true;
 		}
 	}
-	else if ! ::arch::memory::virt::is_reserved(ptr) {
+	else if ! crate::arch::memory::virt::is_reserved(ptr) {
 		return false;
 	}
-	let rem_ofs = ::PAGE_SIZE - addr % ::PAGE_SIZE;
+	let rem_ofs = crate::PAGE_SIZE - addr % crate::PAGE_SIZE;
 	
 	if size > rem_ofs
 	{
@@ -125,12 +136,12 @@ pub fn buf_valid(ptr: *const (), mut size: usize) -> bool
 		size -= rem_ofs;
 		while size != 0
 		{
-			if ! ::arch::memory::virt::is_reserved(addr as *const ()) {
+			if ! crate::arch::memory::virt::is_reserved(addr as *const ()) {
 				return false;
 			}
-			if size > ::PAGE_SIZE {
-				size -= ::PAGE_SIZE;
-				addr += ::PAGE_SIZE;
+			if size > crate::PAGE_SIZE {
+				size -= crate::PAGE_SIZE;
+				addr += crate::PAGE_SIZE;
 			}
 			else {
 				break;

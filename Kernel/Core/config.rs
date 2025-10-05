@@ -2,58 +2,151 @@
 // - By John Hodge (thePowersGang)
 //
 // Core/config.rs
-//! Boot-time configuration managment
-#[allow(unused_imports)]
-use prelude::*;
+//! Boot-time configuration management
+// NOTE: See the bottom of the file for the runtime configuration options
+#![allow(static_mut_refs)]
 
-pub enum Value
+/// Initialise the kerel config from a command-line string.
+/// 
+/// UNSAFE: Needs to be called in a single-threaded context, as it mutates a `static mut``
+pub unsafe fn init(cmdline: &'static str)
 {
-	/// VFS - Volume to mount as the 'system' disk
-	SysDisk,
-	/// VFS - Path relative to the root of SysDisk where Tifflin was installed
-	SysRoot,
+	S_CONFIG.init(cmdline);
+	S_TEST_FLAGS.init(S_CONFIG.get_str(Value::TestFlags));
 }
 
-static mut S_SYSDISK: Option<&'static str> = None;
-static mut S_SYSROOT: Option<&'static str> = None;
-
-pub fn init(cmdline: &'static str)
-{
-	for ent in cmdline.split(' ')
-	{
-		let mut it = ent.splitn(2, '=');
-		let tag = it.next().unwrap();
-		let value = it.next();
-		match tag
-		{
-		"SYSDISK" =>
-			match value
-			{
-			// SAFE: Called in single-threaded context
-			Some(v) => unsafe { S_SYSDISK = Some(v); },
-			None => log_warning!("SYSDISK requires a value"),
-			},
-		"SYSROOT" =>
-			match value
-			{
-			// SAFE: Called in single-threaded context
-			Some(v) => unsafe { S_SYSROOT = Some(v); },
-			None => log_warning!("SYSDISK requires a value"),
-			},
-		v @ _ => log_warning!("Unknown option '{}", v),
-		}
-	}
+pub fn test_flags<T>(cb: impl FnOnce(&TestFlags)->T)->T {
+	// SAFE: This is only modified with the above unsafe function
+	unsafe { cb(&S_TEST_FLAGS) }
 }
 
-pub fn get_string(val: Value) -> &'static str
-{
+/// Get a configuration parameter from the kernel config
+pub fn get_string(val: Value) -> &'static str {
 	// SAFE: No mutation should happen when get_string is being called
 	unsafe {
-		match val
+		S_CONFIG.get_str(val)
+	}
+}
+/// Iterator over the names of modules that should not be started
+pub fn disabled_module_names() -> impl Iterator<Item=&'static str> {
+	get_string(Value::DisabledModules).split(',').map(|v| v.trim())
+}
+
+macro_rules! def_config_set {
+	(
+		$enum_name:ident in $struct_name:ident : {
+			$(
+			$(#[$at:meta])*
+			$name:ident @ $sname:pat = $default:expr,
+			)*
+		}
+	) => {
+		#[allow(non_snake_case)]
+		struct $struct_name {
+			$($name: Option<&'static str>),*
+		}
+		pub enum $enum_name {
+			$( $(#[$at])* $name, )*
+		}
+		impl Config
 		{
-		Value::SysDisk => S_SYSDISK.unwrap_or("ATA-0p0"),
-		Value::SysRoot => S_SYSROOT.unwrap_or("/system/Tifflin"),
+			const fn new() -> Config {
+				Config { $($name: None),* }
+			}
+			
+			fn init(&mut self, cmdline: &'static str)
+			{
+				for ent in cmdline.split(' ')
+				{
+					let mut it = ent.splitn(2, '=');
+					let tag = it.next().unwrap();
+					let value = it.next();
+					match tag
+					{
+					$(
+					$sname => match value
+						{
+						Some(v) => self.$name = Some(v),
+						None => log_warning!("{} requires a value", tag),
+						},
+					)*
+					v @ _ => log_warning!("Unknown option '{}", v),
+					}
+				}
+			}
+
+			fn get_str(&self, val: Value) -> &'static str
+			{
+				match val
+				{
+				$(
+				Value::$name => self.$name.unwrap_or($default),
+				)*
+				}
+			}
+		}
+	};
+}
+macro_rules! def_test_flags {
+	(
+		in $struct_name:ident
+		$(
+		$(#[$at:meta])*
+		$name:ident,
+		)*
+	) => {
+		pub struct $struct_name
+		{
+			$(
+				$(#[$at])*
+				pub $name: bool,
+			)*
+		}
+		impl $struct_name
+		{
+			const fn new() -> Self {
+				$struct_name {
+					$($name: false,)*
+				}
+			}
+			fn init(&mut self, value: &str)
+			{
+				for v in value.split(',')
+				{
+					let v = v.trim();
+					match v {
+					$( stringify!($name) => self.$name = true, )*
+					_ => {},
+					}
+				}
+			}
 		}
 	}
 }
 
+def_config_set! {
+	Value in Config: {
+		/// VFS - Volume to mount as the 'system' disk
+		SysDisk @ "SYSDISK" = "ATA0p0",
+		/// VFS - Path relative to the root of SysDisk where Tifflin was installed
+		SysRoot @ "SYSROOT" = "/system/Tifflin",
+		/// Startup - Loader executable
+		Loader @ "LOADER" = "/sysroot/bin/loader",
+		/// Startup - Init executable (first userland process)
+		Init @ "INIT" = "/sysroot/bin/init",
+		/// Startup - Testing operations
+		TestFlags @ "TEST" = "",
+		/// Comma-separated list of disabled module names
+		DisabledModules @ "NOMOD" = "",
+	}
+}
+def_test_flags! {
+	in TestFlags
+	/// Disable running of `init`
+	noinit,
+	/// Do not run multi-cpu initialisation
+	single_processor,
+}
+
+static mut S_CONFIG: Config = Config::new();
+static mut S_TEST_FLAGS: TestFlags = TestFlags::new();

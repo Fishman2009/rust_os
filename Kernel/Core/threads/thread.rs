@@ -11,12 +11,41 @@
  * however, it points to a shared block that contains information needed by both the 
  * thread itself, and the "owner" of the thread (e.g process, or controlling driver).
  */
-use prelude::*;
-use lib::mem::Arc;
+use crate::prelude::*;
+use crate::lib::mem::Arc;
 
 /// Thread identifier (unique)
-pub type ThreadID = u32;
-pub type ProcessID = u32;
+#[derive(Debug,PartialEq,Eq,Hash,Copy,Clone)]
+pub struct ThreadID(u32);
+impl ThreadID {
+	pub fn raw(&self) -> u32 {
+		self.0
+	}
+	pub fn from_raw(v: u32) -> Self {
+		ThreadID(v)
+	}
+}
+impl ::core::fmt::Display for ThreadID {
+	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+		write!(f, "TID{}", self.0)
+	}
+}
+/// Process identifier
+#[derive(Debug,PartialEq,Eq,Hash,Copy,Clone)]
+pub struct ProcessID(u32);
+impl ProcessID {
+	pub fn raw(&self) -> u32 {
+		self.0
+	}
+	pub fn from_raw(v: u32) -> Self {
+		ProcessID(v)
+	}
+}
+impl ::core::fmt::Display for ProcessID {
+	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+		write!(f, "PID{}", self.0)
+	}
+}
 
 //#[deriving(PartialEq)]
 /// Thread run state
@@ -27,7 +56,7 @@ pub enum RunState
 	/// Sleeping on a WaitQueue
 	ListWait(*const super::WaitQueue),
 	/// Sleeping on a SleepObject
-	Sleep(*const super::sleep_object::SleepObject),
+	Sleep(*const super::sleep_object::SleepObject<'static>),
 	/// Dead, waiting to be reaped
 	Dead(u32),
 }
@@ -39,16 +68,16 @@ pub struct Process
 {
 	name: String,
 	pid: ProcessID,
-	address_space: ::memory::virt::AddressSpace,
+	address_space: crate::memory::virt::AddressSpace,
 	// TODO: use of a tuple here looks a little crufty
-	exit_status: ::sync::Mutex< (Option<u32>, Option<::threads::sleep_object::SleepObjectRef>) >,
-	pub proc_local_data: ::sync::RwLock<Vec< ::lib::mem::aref::Aref<::core::any::Any+Sync+Send> >>,
+	exit_status: crate::sync::Mutex< (Option<u32>, Option<crate::threads::sleep_object::SleepObjectRef>) >,
+	pub proc_local_data: crate::sync::RwLock<Vec< crate::lib::mem::aref::Aref<dyn core::any::Any+Sync+Send> >>,
 }
 /// Handle to a process, used for spawning and communicating
 pub struct ProcessHandle(Arc<Process>);
 impl_fmt! {
 	Debug(self, f) for ProcessHandle {
-		write!(f, "P({} {})", self.0.pid, self.0.name)
+		write!(f, "P({} {})", self.0.pid.0, self.0.name)
 	}
 }
 
@@ -57,6 +86,7 @@ struct SharedBlock
 	name: String,
 	tid: ThreadID,
 	process: Arc<Process>,
+	complete: crate::sync::EventChannel,
 }
 
 /// An owning thread handle
@@ -67,6 +97,9 @@ pub struct ThreadHandle
 	// - Race problems
 }
 
+/// "Owned" pointer to a thread (panics if dropped)
+pub struct ThreadPtr(crate::lib::mem::Unique<Thread>);
+
 /// Thread information
 pub struct Thread
 {
@@ -75,17 +108,17 @@ pub struct Thread
 	pub run_state: RunState,
 	
 	/// CPU state
-	pub cpu_state: ::arch::threads::State,
+	pub cpu_state: crate::arch::threads::State,
 	/// Next thread in intrusive list
-	pub next: Option<Box<Thread>>,
+	pub next: Option<ThreadPtr>,
 }
 assert_trait!{Thread : Send}
 
 /// Last allocated TID (because TID0 is allocated differently)
-static S_LAST_TID: ::core::sync::atomic::AtomicUsize = ::core::sync::atomic::ATOMIC_USIZE_INIT;
-const C_MAX_TID: usize = 0x7FFF_FFF0;	// Leave 16 TIDs spare at end of 31 bit number
-static S_LAST_PID: ::core::sync::atomic::AtomicUsize = ::core::sync::atomic::ATOMIC_USIZE_INIT;
-const C_MAX_PID: usize = 0x007F_FFF0;	// Leave 16 PIDs spare at end of 23 bit number
+static S_LAST_TID: ::core::sync::atomic::AtomicU32 = ::core::sync::atomic::AtomicU32::new(0);
+const C_MAX_TID: u32 = 0x7FFF_FFF0;	// Leave 16 TIDs spare at end of 31 bit number
+static S_LAST_PID: ::core::sync::atomic::AtomicU32 = ::core::sync::atomic::AtomicU32::new(0);
+const C_MAX_PID: u32 = 0x007F_FFF0;	// Leave 16 PIDs spare at end of 23 bit number
 
 fn allocate_tid() -> ThreadID
 {
@@ -99,10 +132,10 @@ fn allocate_tid() -> ThreadID
 		panic!("TODO: Handle TID exhaustion by searching for free (raced)");
 	}
 	
-	(rv + 1) as ThreadID
+	ThreadID(rv + 1)
 }
 
-fn allocate_pid() -> u32
+fn allocate_pid() -> ProcessID
 {
 	// Preemptively prevent rollover
 	if S_LAST_PID.load(::core::sync::atomic::Ordering::Relaxed) == C_MAX_PID - 1 {
@@ -114,7 +147,7 @@ fn allocate_pid() -> u32
 		panic!("TODO: Handle PID exhaustion by searching for free (raced)");
 	}
 	
-	(rv + 1) as u32
+	ProcessID(rv + 1)
 }
 
 impl Process
@@ -122,25 +155,25 @@ impl Process
 	pub fn new_pid0() -> Arc<Process> {
 		Arc::new(Process {
 			name: String::from("PID0"),
-			pid: 0,
+			pid: ProcessID(0),
 			exit_status: Default::default(),
-			address_space: ::memory::virt::AddressSpace::pid0(),
-			proc_local_data: ::sync::RwLock::new( Vec::new() ),
+			address_space: crate::memory::virt::AddressSpace::pid0(),
+			proc_local_data: crate::sync::RwLock::new( Vec::new() ),
 		})
 	}
-	pub fn new<S: Into<String>+::core::fmt::Debug>(name: S, addr_space: ::memory::virt::AddressSpace) -> Arc<Process>
+	pub fn new<S: Into<String>+::core::fmt::Debug>(name: S, addr_space: crate::memory::virt::AddressSpace) -> Arc<Process>
 	{
 		Arc::new(Process {
 			pid: allocate_pid(),
 			name: name.into(),
 			exit_status: Default::default(),
 			address_space: addr_space,
-			proc_local_data: ::sync::RwLock::new( Vec::new() ),
+			proc_local_data: crate::sync::RwLock::new( Vec::new() ),
 		})
 	}
 	
-	fn empty_cpu_state(&self) -> ::arch::threads::State {
-		::arch::threads::State::new( &self.address_space )
+	fn empty_cpu_state(&self) -> crate::arch::threads::State {
+		crate::arch::threads::State::new( &self.address_space )
 	}
 
 	pub fn get_pid(&self) -> ProcessID { self.pid }
@@ -161,41 +194,98 @@ impl Process
 		}
 	}
 }
+
 impl ProcessHandle
 {
 	pub fn new<S: Into<String>+::core::fmt::Debug>(name: S, clone_start: usize, clone_end: usize) -> ProcessHandle {
-		ProcessHandle( Process::new(name, ::memory::virt::AddressSpace::new(clone_start, clone_end)) )
+		ProcessHandle( Process::new(name, crate::memory::virt::AddressSpace::new(clone_start, clone_end).expect("ProcessHandle::new - OOM")) )
 	}
 	
+	#[cfg(not(feature="test"))]
 	pub fn start_root_thread(&mut self, ip: usize, sp: usize) {
-		assert!( ::lib::mem::arc::get_mut(&mut self.0).is_some() );
+		log_trace!("start_root_thread(self={:?}, ip={:#x}, sp={:#x})", self, ip, sp);
+		assert!( Arc::get_mut(&mut self.0).is_some() );
 		
 		let mut thread = Thread::new_boxed(allocate_tid(), format!("{}#1", self.0.name), self.0.clone());
-		::arch::threads::start_thread( &mut thread,
+		crate::arch::threads::start_thread( &mut thread,
 			// SAFE: Well... trusting caller to give us sane addresses etc, but that's the user's problem
 			move || unsafe {
 					log_debug!("Dropping to {:#x} SP={:#x}", ip, sp);
-					::arch::drop_to_user(ip, sp, 0)
+					crate::arch::drop_to_user(ip, sp, 0)
 				}
 			);
 		super::yield_to(thread);
 	}
 
-	pub fn get_process_local<T: Send+Sync+::core::marker::Reflect+Default+'static>(&self) -> Option<::lib::mem::aref::ArefBorrow<T>> {
+	#[cfg(feature="test")]
+	/// Start a process's root thread (unit test / NativeKernel)
+	/// 
+	/// `cb` returns the process's exit status
+	pub fn start_root_thread(&mut self, cb: impl FnOnce()->u32 + Send + 'static) {
+		log_trace!("start_root_thread(self={:?}, ...)", self);
+		assert!( Arc::get_mut(&mut self.0).is_some() );
+		
+		let mut thread = Thread::new_boxed(allocate_tid(), format!("{}#1", self.0.name), self.0.clone());
+		let proc = self.0.clone();
+		crate::arch::threads::start_thread( &mut thread,
+			move || {
+				let status = cb();
+				log_trace!("status = {:#x}", status);
+				proc.mark_exit(status).expect("Double-exit of process?");
+				}
+			);
+		super::yield_to(thread);
+	}
+
+	pub fn get_process_local<T>(&self) -> Option<crate::lib::mem::aref::ArefBorrow<T>>
+	where
+		T: Send+Sync+::core::any::Any+Default+'static
+	{
 		let pld = &self.0.proc_local_data;
 		// 1. Try without write-locking
 		for s in pld.read().iter()
 		{
-			let item_ref: &::core::any::Any = &**s;
-			if item_ref.get_type_id() == ::core::any::TypeId::of::<T>() {
+			let item_ref: &dyn core::any::Any = &**s;
+			if item_ref.type_id() == ::core::any::TypeId::of::<T>() {
 				return Some( s.borrow().downcast::<T>().ok().unwrap() );
 			}
 		}
 		None
 	}
 
+	pub fn get_process_local_alloc<T>(&self) -> crate::lib::mem::aref::ArefBorrow<T>
+	where
+		T: Send+Sync+::core::any::Any+Default+'static
+	{
+		let pld = &self.0.proc_local_data;
+		// 1. Try without write-locking
+		for s in pld.read().iter()
+		{
+			let item_ref: &dyn core::any::Any = &**s;
+			if item_ref.type_id() == ::core::any::TypeId::of::<T>() {
+				return s.borrow().downcast::<T>().ok().unwrap();
+			}
+		}
+		// 2. Try _with_ write-locking
+		let mut lh = pld.write();
+		for s in lh.iter()
+		{
+			let item_ref: &dyn core::any::Any = &**s;
+			if item_ref.type_id() == ::core::any::TypeId::of::<T>() {
+				return s.borrow().downcast::<T>().ok().unwrap();
+			}
+		}
+		// 3. Create an instance
+		log_debug!("Creating instance of {} for {:?} (remote)", type_name!(T), self);
+		let buf = crate::lib::mem::aref::Aref::new(T::default());
+		let ret = buf.borrow();
+		lh.push( buf );
+		ret
+	}
 
-	pub fn bind_wait_terminate(&self, obj: &mut ::threads::SleepObject) {
+
+	pub fn bind_wait_terminate(&self, obj: &mut crate::threads::SleepObject) {
+		log_trace!("bind_wait_terminate({:p}, obj={:p})", self, obj);
 		let mut lh = self.0.exit_status.lock();
 		if let Some(_status) = lh.0 {
 			obj.signal();
@@ -207,11 +297,17 @@ impl ProcessHandle
 			lh.1 = Some( obj.get_ref() );
 		}
 	}
-	pub fn clear_wait_terminate(&self, obj: &mut ::threads::SleepObject) -> bool {
+	/// Returns true if the process has already terminated
+	pub fn clear_wait_terminate(&self, obj: &mut crate::threads::SleepObject) -> bool {
+		log_trace!("clear_wait_terminate({:p}, obj={:p})", self, obj);
 		let mut lh = self.0.exit_status.lock();
 
-		assert!(lh.1.is_some());
-		assert!(lh.1.as_ref().unwrap().is_from(obj));
+		if let Some(ref v) = lh.1 {
+			assert!(v.is_from(obj), "clear_wait_terminate from different object");
+		}
+		else {
+			log_trace!("- Wasn't registered");
+		}
 		lh.1 = None;
 		
 		lh.0.is_some()
@@ -219,6 +315,17 @@ impl ProcessHandle
 
 	pub fn get_exit_status(&self) -> Option<u32> {
 		self.0.exit_status.lock().0
+	}
+}
+impl ::core::ops::Deref for ProcessHandle {
+	type Target = Process;
+	fn deref(&self) -> &Process {
+		&*self.0
+	}
+}
+impl ::core::ops::Drop for ProcessHandle {
+	fn drop(&mut self) {
+		log_notice!("Dropping handle {:?} - ref_count={}", self, Arc::strong_count(&self.0));
 	}
 }
 
@@ -230,7 +337,11 @@ impl ThreadHandle
 		let handle = ThreadHandle {
 			block: thread.block.clone(),
 			};
-		::arch::threads::start_thread(&mut thread, fcn);
+		let block = thread.block.clone();
+		crate::arch::threads::start_thread(&mut thread, move || {
+			fcn();
+			block.complete.post();
+			});
 		
 		// Yield to this thread
 		super::yield_to(thread);
@@ -248,28 +359,99 @@ impl ::core::fmt::Debug for ThreadHandle
 impl ::core::ops::Drop for ThreadHandle
 {
 	fn drop(&mut self) {
-		panic!("TODO: Wait for thread to terminate when handle is dropped");
+		super::yield_time();
+		self.block.complete.sleep();
+	}
+}
+
+impl ThreadPtr {
+	pub fn new(ptr: Box<Thread>) -> ThreadPtr {
+		// SAFE: Non-zero value
+		ThreadPtr( unsafe { crate::lib::mem::Unique::new_unchecked( Box::into_raw(ptr) ) } )
+	}
+	pub fn new_static(ptr: &'static mut Thread) -> ThreadPtr {
+		// SAFE: Non-zero value
+		ThreadPtr( unsafe { crate::lib::mem::Unique::new_unchecked( (ptr as *mut _ as usize | 1) as *mut Thread) } )
+	}
+	pub fn into_boxed(self) -> Result<Box<Thread>, &'static mut Thread> {
+		let p = self.0.as_ptr() as usize;
+		::core::mem::forget(self);
+		if p & 1 == 0 {
+			// SAFE: bit 0 unset indicates heap pointer
+			Ok( unsafe { Box::from_raw(p as *mut Thread) } )
+		}
+		else {
+			// SAFE: bit 1 is cleared, pointer is valid
+			Err( unsafe { &mut *( (p & !1) as *mut Thread ) } )
+		}
+	}
+	fn as_ptr(&self) -> *mut Thread {
+		let p = (self.0.as_ptr() as usize) & !1;
+		p as *mut Thread
+	}
+	pub fn unwrap(self) -> *mut Thread {
+		let rv = self.as_ptr();
+		::core::mem::forget(self);
+		rv
+	}
+
+	pub fn into_usize(self) -> usize {
+		let rv = self.0.as_ptr() as usize;
+		::core::mem::forget(self);
+		rv
+	}
+	pub unsafe fn from_usize(v: usize) -> Self {
+		ThreadPtr( crate::lib::mem::Unique::new_unchecked( v as *mut Thread ) )
+	}
+}
+impl ::core::ops::Deref for ThreadPtr {
+	type Target = Thread;
+	fn deref(&self) -> &Thread {
+		// SAFE: Owned pointer
+		unsafe { &*self.as_ptr() }
+	}
+}
+impl ::core::ops::DerefMut for ThreadPtr {
+	fn deref_mut(&mut self) -> &mut Thread {
+		// SAFE: Owned pointer
+		unsafe { &mut *self.as_ptr() }
+	}
+}
+impl ::core::ops::Drop for ThreadPtr {
+	fn drop(&mut self) {
+		panic!("Dropping an owned thread pointer - {:?}", self);
+	}
+}
+impl ::core::fmt::Debug for ThreadPtr {
+	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+		let t: &Thread = &self;
+		::core::fmt::Debug::fmt( t, f )
 	}
 }
 
 impl Thread
 {
 	/// Create a new thread
-	pub fn new_boxed<S: Into<String>>(tid: ThreadID, name: S, process: Arc<Process>) -> Box<Thread>
+	pub fn new_boxed<S: Into<String>>(tid: ThreadID, name: S, process: Arc<Process>) -> ThreadPtr
 	{
-		let rv = box Thread {
+		let rv = Box::new(Thread {
 			cpu_state: process.empty_cpu_state(),
-			block: Arc::new( SharedBlock { tid: tid, name: name.into(), process: process } ),
+			block: Arc::new(SharedBlock {
+				tid: tid,
+				name: name.into(),
+				process: process,
+				complete: crate::sync::EventChannel::new(),
+				}),
 			run_state: RunState::Runnable,
 			next: None,
-			};
+			});
 		
 		// TODO: Add to global list of threads (removed on destroy)
 		log_debug!("Creating thread {:?}", rv);
 		
-		rv
+		ThreadPtr::new( rv )
 	}
-	
+
 	pub fn get_tid(&self) -> ThreadID { self.block.tid }
 	
 	/// Set the execution state of this thread
@@ -281,9 +463,14 @@ impl Thread
 	
 	/// Assert that this thread is runnable
 	pub fn assert_active(&self) {
-		assert!( !is!(self.run_state, RunState::Sleep(_)) );
-		assert!( !is!(self.run_state, RunState::ListWait(_)) );
-		assert!( is!(self.run_state, RunState::Runnable) );
+		match self.run_state
+		{
+		RunState::Dead(_) => panic!("Thread:assert_active - Dead"),
+		RunState::Sleep(_) => panic!("Thread:assert_active - Sleeping"),
+		RunState::ListWait(_) => panic!("Thread:assert_active - ListWait"),
+		RunState::Runnable => {},
+		//_ => panic!("Thread::assert_active - Other"),
+		}
 	}
 	
 	pub fn get_process_info(&self) -> &Process {
@@ -291,11 +478,17 @@ impl Thread
 	}
 }
 
+pub fn new_idle_thread(cpu: usize) -> ThreadPtr {
+	let mut thread = Thread::new_boxed(allocate_tid(), format!("Idle#{}", cpu), super::S_PID0.clone());
+	crate::arch::threads::start_thread(&mut thread, super::idle_thread);
+	thread
+}
+
 impl ::core::fmt::Display for SharedBlock
 {
 	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result
 	{
-		write!(f, "{} {}", self.tid, self.name)
+		write!(f, "{} {}", self.tid.0, self.name)
 	}
 }
 
@@ -309,7 +502,7 @@ impl ::core::fmt::Debug for Thread
 
 impl_fmt! {
 	Display(self, f) for Process {
-		write!(f, "PID{}:'{}'", self.pid, self.name)
+		write!(f, "PID{}:'{}'", self.pid.0, self.name)
 	}
 }
 
@@ -318,7 +511,7 @@ impl ::core::ops::Drop for Thread
 	fn drop(&mut self)
 	{
 		// TODO: Remove self from the global thread map
-		log_debug!("Destroying thread {:?}", self);
+		log_debug!("Destroying thread {:?} - {} handles to block, {} to process", self, Arc::strong_count(&self.block), Arc::strong_count(&self.block.process));
 	}
 }
 

@@ -4,7 +4,7 @@
 // Core/lib/byte_str.rs
 //! Byte strings (used for the VFS, and other places where UTF-8 can't be enforced)
 #[allow(unused_imports)]
-use prelude::*;
+use crate::prelude::*;
 use core::{cmp,ops};
 
 #[derive(PartialOrd,Ord,PartialEq,Eq)]
@@ -22,29 +22,39 @@ impl ByteStr
 	pub fn len(&self) -> usize { self.0.len() }
 	pub fn as_bytes(&self) -> &[u8] { &self.0 }
 }
+impl AsRef<ByteStr> for ByteStr {
+	fn as_ref(&self) -> &ByteStr {
+		self
+	}
+}
 impl AsRef<ByteStr> for str {
 	fn as_ref(&self) -> &ByteStr {
 		ByteStr::new(self)
 	}
 }
+impl AsRef<ByteStr> for String {
+	fn as_ref(&self) -> &ByteStr {
+		ByteStr::new(&**self)
+	}
+}
 impl_fmt! {
 	Debug(self,f) for ByteStr {{
-		try!(write!(f, "b\""));
+		write!(f, "b\"")?;
 		for &b in &self.0
 		{
 			match b
 			{
-			b'\\' => try!(write!(f, "\\\\")),
-			b'\n' => try!(write!(f, "\\n")),
-			b'\r' => try!(write!(f, "\\r")),
-			b'"' => try!(write!(f, "\\\"")),
-			b'\0' => try!(write!(f, "\\0")),
+			b'\\' => write!(f, "\\\\")?,
+			b'\n' => write!(f, "\\n")?,
+			b'\r' => write!(f, "\\r")?,
+			b'"'  => write!(f, "\\\"")?,
+			b'\0' => write!(f, "\\0")?,
 			// ASCII printable characters
-			32...127 => try!(write!(f, "{}", b as char)),
-			_ => try!(write!(f, "\\x{:02x}", b)),
+			32..=127 => write!(f, "{}", b as char)?,
+			_ => write!(f, "\\x{:02x}", b)?,
 			}
 		}
-		try!(write!(f, "\""));
+		write!(f, "\"")?;
 		Ok( () )
 	}}
 	Debug(self,f) for ByteString {
@@ -73,7 +83,12 @@ impl cmp::PartialEq<str> for ByteStr {
 		cmp::PartialEq::eq(&self.0, v.as_bytes())
 	}
 }
-impl ::lib::borrow::ToOwned for ByteStr {
+impl cmp::PartialEq<[u8]> for ByteStr {
+	fn eq(&self, v: &[u8]) -> bool {
+		cmp::PartialEq::eq(&self.0, v)
+	}
+}
+impl crate::lib::borrow::ToOwned for ByteStr {
 	type Owned = ByteString;
 	fn to_owned(&self) -> ByteString {
 		ByteString::from(self)
@@ -84,6 +99,14 @@ impl ByteString
 {
 	pub fn new() -> ByteString {
 		ByteString(Vec::new())
+	}
+}
+impl ::core::iter::FromIterator<u8> for ByteString {
+	fn from_iter<T>(iterator: T) -> ByteString
+	where
+		T: IntoIterator<Item=u8>
+	{
+		From::<Vec<u8>>::from(iterator.into_iter().collect())
 	}
 }
 
@@ -110,7 +133,7 @@ impl AsRef<[u8]> for ByteString {
 		&self.0
 	}
 }
-impl ::lib::borrow::Borrow<ByteStr> for ByteString {
+impl crate::lib::borrow::Borrow<ByteStr> for ByteString {
 	fn borrow(&self) -> &ByteStr {
 		&**self
 	}

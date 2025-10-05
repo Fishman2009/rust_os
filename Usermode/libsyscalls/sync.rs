@@ -1,7 +1,7 @@
 //
 //
 //
-//! Synchonisation primitives
+//! Synchronisation primitives
 use core::ops;
 use core::sync::atomic::{AtomicUsize,Ordering};
 use core::cell::UnsafeCell;
@@ -16,7 +16,7 @@ impl<T> Mutex<T>
 		Mutex( AtomicUsize::new(1), UnsafeCell::new(v) )
 	}
 
-	pub fn lock(&self) -> HeldMutex<T> {
+	pub fn lock(&self) -> HeldMutex<'_, T> {
 		if self.0.fetch_sub(1, Ordering::Acquire) == 1 {
 			HeldMutex { _ptr: self, }
 		}
@@ -27,8 +27,7 @@ impl<T> Mutex<T>
 
 	pub fn unwrap(self) -> T {
 		assert_eq!( self.0.load(Ordering::Relaxed), 0 );
-		// SAFE: By-value self, so no aliasing
-		unsafe { self.1.into_inner() }
+		self.1.into_inner()
 	}
 
 	/// UNSAFE: User needs to ensure that resources are no longer borrowed
@@ -64,6 +63,21 @@ impl<'a, T: 'a> ops::Drop for HeldMutex<'a, T>
 		if self._ptr.0.fetch_add(1, Ordering::Release) != 0 {
 			panic!("TODO: Release Mutex when contended");
 		}
+	}
+}
+
+pub fn futex_wait(addr: &AtomicUsize, sleep_if_val: usize)
+{
+	// SAFE: Assumed
+	unsafe {
+		crate::syscall(syscall_values::CORE_FUTEX_SLEEP { addr, sleep_if_val });
+	}
+}
+pub fn futex_wake(addr: &AtomicUsize, num_to_wake: usize)
+{
+	// SAFE: Assumed
+	unsafe {
+		crate::syscall(syscall_values::CORE_FUTEX_WAKE { addr, num_to_wake });
 	}
 }
 

@@ -3,9 +3,8 @@
 //
 // arch/amd64/acpi/mod_mine.rs
 //! ACPI Component Architecture binding
-use prelude::*;
-use core::fmt;
-use core::str::from_utf8;
+use crate::prelude::*;
+use crate::lib::byte_str::ByteStr;
 
 use self::TLSDT::{TopRSDT,TopXSDT};
 use super::{SDT,SDTHeader};
@@ -13,14 +12,9 @@ pub use super::GAS;
 
 mod fadt;
 mod aml;
+mod sdt_handle;
 
-/// A handle to a SDT
-pub struct SDTHandle<T:'static>
-{
-	maphandle: ::memory::virt::AllocHandle,
-	ofs: usize,
-	_type: ::core::marker::PhantomData<T>,
-}
+pub use self::sdt_handle::SDTHandle;
 
 struct ACPI
 {
@@ -63,10 +57,10 @@ struct RSDT
 #[repr(C)]
 struct XSDT
 {
-	pointers: u64,	// Rust doesn't support arbitary length arrays
+	pointers: u64,	// Rust doesn't support arbitrary length arrays
 }
 
-static S_ACPI_STATE: ::lib::LazyStatic<ACPI> = lazystatic_init!();
+static S_ACPI_STATE: crate::lib::LazyStatic<ACPI> = lazystatic_init!();
 
 /// ACPI module init - Locate the [RX]SDT
 pub fn init()
@@ -80,7 +74,7 @@ pub fn init()
 		};
 	log_debug!("RSDP = {:p} {{ oemid = {:?}, revision = {:#x}, rsdt_address = {:#x} }}",
 		rsdp,
-		::core::str::from_utf8(&rsdp.oemid), rsdp.revision, rsdp.rsdt_address);
+		::core::str::from_utf8(&rsdp.oemid), rsdp.revision, {rsdp.rsdt_address});
 	
 	// Determine the top-level SDT type
 	// SAFE: The addresses are valid (well, they should be, the checksums passed)
@@ -88,8 +82,7 @@ pub fn init()
 			if rsdp.revision == 0 {
 				TopRSDT( SDTHandle::<RSDT>::new( rsdp.rsdt_address as u64 ).make_static() )
 			} else {
-				// SAFE: It's actually a v2 RDSP, so transmute is valid
-				let v2: &RSDPv2 = unsafe { ::core::mem::transmute(rsdp) };
+				let v2: &RSDPv2 = &*(rsdp as *const _ as *const _);
 				if sum_struct(v2) != 0 {
 					// oh
 					panic!("RSDPv2 checksum failed");
@@ -97,7 +90,7 @@ pub fn init()
 				TopXSDT( SDTHandle::<XSDT>::new( v2.xsdt_address ).make_static() )
 			}
 		};
-	log_debug!("*SDT = {{ signature = {}, oemid = '{}' }}", tl.signature(), tl.oemid());
+	log_debug!("*SDT = {{ signature = {:?}, oemid = {:?} }}", tl.signature(), tl.oemid());
 	if !tl.validate() {
 		log_error!("Root SDT failed validation");
 		return ;
@@ -106,18 +99,17 @@ pub fn init()
 	// Obtain list of SDTs (signatures only)
 	let names = (0 .. tl.len()).map( |i| tl.get::<SDTHeader>(i).raw_signature() ).collect();
 	
-	// SAFE: Called in a single-threaded context
-	unsafe {
-		S_ACPI_STATE.prep(|| ACPI { top_sdt: tl, names: names, });
-	}
+	S_ACPI_STATE.prep(|| ACPI { top_sdt: tl, names, });
 	
 	
 	// Poke sub-enumerators
 	fadt::parse_fadt();
 }
+pub fn init_late() {
+}
 
 /// Find all SDTs with a given signature
-pub fn find_table<T:'static>(req_name: &str, mut idx: usize) -> Option<SDTHandle<T>>
+pub fn find_table<T: 'static + crate::lib::POD>(req_name: &str, mut idx: usize) -> Option<SDTHandle<T>>
 {
 	log_debug!("find('{}',{})", req_name, idx);
 	assert_eq!(req_name.len(), 4);
@@ -151,11 +143,11 @@ fn get_rsdp() -> Option<&'static RSDP>
 {
 	// SAFE: Valid pointers are passed
 	unsafe {
-		let ebda_ver = locate_rsdp((::arch::memory::addresses::IDENT_START + 0x9_FC00) as *const u8, 0x400);
+		let ebda_ver = locate_rsdp((crate::arch::amd64::memory::addresses::IDENT_START + 0x9_FC00) as *const u8, 0x400);
 		if !ebda_ver.is_null() {
 			return ebda_ver.as_ref();
 		}
-		let bios_ver = locate_rsdp((::arch::memory::addresses::IDENT_START + 0xE_0000) as *const u8, 0x2_0000);
+		let bios_ver = locate_rsdp((crate::arch::amd64::memory::addresses::IDENT_START + 0xE_0000) as *const u8, 0x2_0000);
 		if !bios_ver.is_null() {
 			return bios_ver.as_ref();
 		}
@@ -166,7 +158,7 @@ fn get_rsdp() -> Option<&'static RSDP>
 unsafe fn locate_rsdp(base: *const u8, size: usize) -> *const RSDP
 {
 	//for ofs in (0 .. size).step_by(16)
-	for i in (0 .. size)
+	for i in 0 .. (size/16)
 	{
 		let ofs = i * 16;
 		let sig = base.offset(ofs as isize) as *const [u8; 8];
@@ -182,8 +174,8 @@ unsafe fn locate_rsdp(base: *const u8, size: usize) -> *const RSDP
 	::core::ptr::null()
 }
 
-/// Caclulate the byte sum of a structure
-fn sum_struct<T: ::lib::POD>(s: &T) -> u8
+/// Calculate the byte sum of a structure
+fn sum_struct<T: crate::lib::POD>(s: &T) -> u8
 {
 	// SAFE: T is POD
 	unsafe {
@@ -195,13 +187,13 @@ fn sum_struct<T: ::lib::POD>(s: &T) -> u8
 
 impl TLSDT
 {
-	fn _header<'self_>(&'self_ self) -> &'self_ SDTHeader {
+	fn header(&self) -> &SDTHeader {
 		match self {
 		&TopRSDT(sdt) => &(*sdt).header,
 		&TopXSDT(sdt) => &(*sdt).header,
 		}
 	}
-	unsafe fn _getaddr(&self, idx: usize) -> u64 {
+	unsafe fn getaddr(&self, idx: usize) -> u64 {
 		match self {
 		&TopRSDT(sdt) => (*sdt).getptr(idx),
 		&TopXSDT(sdt) => (*sdt).getptr(idx),
@@ -215,23 +207,23 @@ impl TLSDT
 	}
 	
 	fn len(&self) -> usize {
-		(self._header().length as usize - ::core::mem::size_of::<SDTHeader>()) / match self {
+		(self.header().length as usize - ::core::mem::size_of::<SDTHeader>()) / match self {
 			&TopRSDT(_) => 4,
 			&TopXSDT(_) => 8,
 			}
 	}
 	
-	fn signature<'self_>(&'self_ self) -> &'self_ str {
-		from_utf8(&self._header().signature).unwrap()
+	fn signature(&self) -> &ByteStr {
+		ByteStr::new(&self.header().signature)
 	}
-	fn oemid<'self_>(&'self_ self) -> &'self_ str {
-		from_utf8(&self._header().oemid).unwrap()
+	fn oemid(&self) -> &ByteStr {
+		ByteStr::new(&self.header().oemid)
 	}
-	fn get<T>(&self, idx: usize) -> SDTHandle<T> {
+	fn get<T: crate::lib::POD>(&self, idx: usize) -> SDTHandle<T> {
 		// SAFE: Immutable access, and address is as validated as can be
 		unsafe {
 			assert!(idx < self.len());
-			SDTHandle::<T>::new(self._getaddr(idx))
+			SDTHandle::<T>::new(self.getaddr(idx))
 		}
 	}
 }
@@ -259,69 +251,5 @@ impl RSDTTrait for SDT<XSDT>
 	}
 }
 
-impl ::core::fmt::Debug for SDTHeader
-{
-	fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result
-	{
-		write!(f, "SDTHeader = {{ sig:{:?},length='{}',rev={},checksum={},  oemid={:?},oem_table_id={:?},oem_revision={}, creator_id={:#x}, creator_revision={} }}",
-			from_utf8(&self.signature), self.length, self.revision, self.checksum,
-			from_utf8(&self.oemid), from_utf8(&self.oem_table_id), self.oem_revision,
-			self.creator_id, self.creator_revision)
-	}
-}
-
-impl<T> SDTHandle<T>
-{
-	/// Map an SDT into memory, given a physical address
-	pub unsafe fn new(physaddr: u64) -> SDTHandle<T>
-	{
-		//log_trace!("new(physaddr={:#x})", physaddr);
-		let ofs = (physaddr & (::PAGE_SIZE - 1) as u64) as usize;
-		
-		// Obtain length (and validate)
-		// TODO: Support the SDT header spanning acrosss two pages
-		assert!(::PAGE_SIZE - ofs >= ::core::mem::size_of::<SDTHeader>());
-		// Map the header into memory temporarily (maybe)
-		let mut handle = match ::memory::virt::map_hw_ro(physaddr - ofs as u64, 1, "ACPI") {
-			Ok(v) => v,
-			Err(_) => panic!("Oops, temp mapping SDT failed"),
-			};
-		let (length,) = {
-			let hdr = handle.as_ref::<SDTHeader>(ofs);
-			
-			// Get the length
-			(hdr.length as usize,)
-			};
-		
-		// Map the resultant memory
-		let npages = (ofs + length + ::PAGE_SIZE - 1) / ::PAGE_SIZE;
-		log_trace!("npages = {}, ofs = {}, length = {}", npages, ofs, length);
-		if npages != 1
-		{
-			handle = match ::memory::virt::map_hw_ro(physaddr - ofs as u64, npages, "ACPI") {
-				Ok(x) => x,
-				Err(_) => panic!("Map fail")
-				};
-		}
-		SDTHandle {
-			maphandle: handle,
-			ofs: ofs,
-			_type: ::core::marker::PhantomData,
-			}
-	}
-	
-	pub fn make_static(self) -> &'static SDT<T>
-	{
-		self.maphandle.make_static::<SDT<T>>(self.ofs)
-	}
-}
-
-impl<T> ::core::ops::Deref for SDTHandle<T>
-{
-	type Target = SDT<T>;
-	fn deref<'s>(&'s self) -> &'s SDT<T> {
-		self.maphandle.as_ref(self.ofs)
-	}
-}
 
 // vim: ft=rust

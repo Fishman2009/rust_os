@@ -1,11 +1,15 @@
 
+#include "common.S"
+
 .section .text.start
 
 .extern main
 .extern register_arguments
 
-.globl start
+.weak start
+// Arguments: A `&[&CStr]` in RDI, RSI
 start:
+	add $8, %rsp	// Stack is currently off-alignment, so restore alignment before doing any HLL calls
 	call *start_ra(%rip)
 	mov $0, %rdi
 	mov $0, %rsi
@@ -13,7 +17,7 @@ start:
 	
 	// Save return value for EXITPROCESS call
 	mov %rax, %rdi
-	mov $2, %rax
+	mov $CORE_EXIT, %rax
 	syscall
 	ud2
 start_ra: .quad register_arguments
@@ -36,8 +40,20 @@ memset:
 // RDX = Count
 .globl memcpy
 memcpy:
-	mov %rdx, %rcx
 	mov %rdi, %rax // Prepare to return RDI
+	// Check if a word-wise copy is possible
+	test $7, %di
+	jnz 1f
+	test $7, %si
+	jnz 1f
+	test $7, %dx
+	jnz 1f
+	mov %rdx, %rcx
+	shr $3, %rcx
+	rep movsq
+	ret
+1:
+	mov %rdx, %rcx
 	rep movsb
 	ret
 // RDI = Destination
@@ -75,7 +91,7 @@ memcmp:
 	inc %rax
 	ret
 
-// Unkown args, don't care
+// Unknown args, don't care
 .globl _Unwind_Resume
 _Unwind_Resume:
 	jmp .

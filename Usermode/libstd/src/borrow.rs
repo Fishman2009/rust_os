@@ -3,20 +3,18 @@
 //
 // Core/lib/borrow.rs
 //! Borrowed value manipulations (copy of ::std::borrow).
-use collections::{Vec,String};
+use alloc::{Vec,String};
 
 /// A copy-on-write value
 pub enum Cow<'a, B: ?Sized>
 where
-	B: 'a,
-	B: ToOwned
+	B: 'a + ToOwned
 {
 	/// Immutably borrowed value
 	Borrowed(&'a B),
 	/// Owned value
 	Owned(<B as ToOwned>::Owned),
 }
-
 pub enum MaybeOwned<'a, B, O>
 where
 	B: 'a,
@@ -58,6 +56,17 @@ impl<'a, T: ?Sized> Borrow<T> for &'a mut T { fn borrow(&self) -> &T { *self } }
 //		<V as Borrow<U>>::borrow(self).borrow()
 //	}
 //}
+
+impl<'a, B: 'a + ?Sized + ToOwned> Cow<'a, B>
+{
+	fn into_owned(self) -> B::Owned {
+		match self
+		{
+		Cow::Borrowed(b) => b.to_owned(),
+		Cow::Owned(o) => o,
+		}
+	}
+}
 
 impl<'a, B: 'a + ?Sized + ToOwned> ::core::ops::Deref for Cow<'a, B>
 {

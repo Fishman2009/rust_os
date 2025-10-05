@@ -11,7 +11,7 @@ pub const ATTR_HIDDEN   : u8 = 0x02;	// Hidden File
 pub const ATTR_SYSTEM   : u8 = 0x04;	// System File
 pub const ATTR_VOLUMEID : u8 = 0x08;	// Volume ID (Deprecated)
 pub const ATTR_DIRECTORY: u8 = 0x10;	// Directory
-pub const ATTR_LFN: u8 = (ATTR_READONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUMEID);
+pub const ATTR_LFN: u8 = ATTR_READONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOLUMEID;
 #[allow(dead_code)]
 pub const ATTR_ARCHIVE  : u8 = 0x20;	// Flag set by user
 
@@ -45,7 +45,27 @@ fn read_arr16<T: AsMut<[u16]>>(s: &mut &[u8]) -> T {
 	}
 	v
 }
-
+fn write_u8(s: &mut &mut[u8], v: u8) {
+	write_arr(s, &v.to_le_bytes());
+}
+fn write_u16(s: &mut &mut[u8], v: u16) {
+	write_arr(s, &v.to_le_bytes());
+}
+fn write_u32(s: &mut &mut[u8], v: u32) {
+	write_arr(s, &v.to_le_bytes());
+}
+fn write_arr<const N: usize>(s: &mut &mut [u8], v: &[u8; N]) {
+	let (a,b) = ::core::mem::replace(s, &mut []).split_at_mut(N);
+	a.copy_from_slice(v);
+	*s = b;
+}
+fn write_arr16<const N: usize>(s: &mut &mut [u8], v: &[u16; N]) {
+	let (mut a,b) = ::core::mem::replace(s, &mut []).split_at_mut(N * 2);
+	for s in v {
+		write_u16(&mut a, *s);
+	}
+	*s = b;
+}
 pub enum BootSect
 {
 	Legacy(BootSect16),
@@ -98,6 +118,7 @@ impl BootSect {
 	}
 }
 
+#[allow(dead_code)]	// Not all fields are needed to be read
 pub struct BootSectInfo
 {
 	pub _jump: [u8; 3],
@@ -137,11 +158,12 @@ impl BootSectInfo {
 		}
 	}
 }
-struct BootSect16
+pub struct BootSect16
 {
 	common: BootSectInfo,
 	info: BootSect16Info,
 }
+#[allow(dead_code)]	// Not all fields are needed to be read
 pub struct BootSect16Info
 {
 	pub drive_num: u8,
@@ -163,12 +185,13 @@ impl BootSect16Info {
 		}
 	}
 }
-struct BootSect32
+pub struct BootSect32
 {
 	common: BootSectInfo,
 	info32: BootSect32Info,
 	info16: BootSect16Info,
 }
+#[allow(dead_code)]	// Not all fields are needed to be read
 pub struct BootSect32Info
 {
 	pub fat_size_32: u32,
@@ -197,6 +220,7 @@ impl BootSect32Info {
 pub struct DirEnt
 {
 	pub name: [u8; 11],
+	/// Attributes - see `ATTR_*` constants
 	pub attribs: u8,
 	pub lcase: u8,
 	pub creation_ds: u8,	// 10ths of a second
@@ -226,6 +250,20 @@ impl DirEnt {
 			size: read_u32(src),
 		}
 	}
+	pub fn write(&self, dst: &mut &mut[u8]) {
+		write_arr(dst, &self.name);
+		write_u8(dst, self.attribs);
+		write_u8(dst, self.lcase);
+		write_u8(dst, self.creation_ds);
+		write_u16(dst, self.creation_time);
+		write_u16(dst, self.creation_date);
+		write_u16(dst, self.accessed_date);
+		write_u16(dst, self.cluster_hi);
+		write_u16(dst, self.modified_time);
+		write_u16(dst, self.modified_date);
+		write_u16(dst, self.cluster);
+		write_u32(dst, self.size);
+	}
 }
 #[derive(Debug)]
 pub struct DirEntLong
@@ -234,7 +272,7 @@ pub struct DirEntLong
 	pub name1: [u16; 5],
 	pub attrib: u8,	// Must be ATTR_LFN
 	pub ty: u8,	// Dunno?
-	pub checksum: u8,
+	pub short_name_checksum: u8,
 	pub name2: [u16; 6],
 	pub first_cluster: u16,
 	pub name3: [u16; 2],
@@ -246,11 +284,23 @@ impl DirEntLong {
 			name1: read_arr16(src),
 			attrib: read_u8(src),
 			ty: read_u8(src),
-			checksum: read_u8(src),
+			short_name_checksum: read_u8(src),
 			name2: read_arr16(src),
 			first_cluster: read_u16(src),
 			name3: read_arr16(src),
 		}
+	}
+	pub fn write(&self, dst: &mut &mut[u8]) {
+		let l = dst.len();
+		write_u8(dst, self.id);
+		write_arr16(dst, &self.name1);
+		write_u8(dst, self.attrib);
+		write_u8(dst, self.ty);
+		write_u8(dst, self.short_name_checksum);
+		write_arr16(dst, &self.name2);
+		write_u16(dst, self.first_cluster);
+		write_arr16(dst, &self.name3);
+		assert!(l - dst.len() == 32);
 	}
 }
 

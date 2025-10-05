@@ -2,226 +2,256 @@
 // - By John Hodge (thePowersGang)
 //
 // Simplistic console, used as a quick test case (fullscreen window)
-#![feature(const_fn)]
-
 #[macro_use]
 extern crate syscalls;
 
 extern crate cmdline_words_parser;
 
-use syscalls::Object;
+extern crate wtk;
+extern crate r#async;
+extern crate wtk_ele_console;
 
-use syscalls::gui::Colour;
+use wtk::Colour;
 
-mod terminal_surface;
-mod terminal;
-
+mod terminal_element;
 mod input;
 
-use std::fmt::Write;
 
-fn main() {
-	use syscalls::gui::{Group,Window};
+trait Terminal
+{
+	/// Set the current foreground colour
+	fn set_foreground(&self, col: ::wtk::Colour);
+	/// Get the current cursor column
+	fn cur_col(&self) -> usize;
+	/// Delete the character/grapheme to the left of the cursor
+	fn delete_left(&self);
+	/// Delete the character/grapheme at/after the cursor
+	fn delete_right(&self);
+	/// Move the cursor one cell to the left
+	fn cursor_left(&self);
+	/// Move the cursor one cell to the right
+	fn cursor_right(&self);
+
+	fn write_str(&self, s: &str);
+	fn write_fmt(&self, args: ::std::fmt::Arguments);
+}
+
+fn main()
+{
+	let mut maximised = false;
+	// TODO: Create a clone of getopts/docopt for this work
+	for arg in ::std::env::args_os().skip(1) {
+		match arg.as_bytes()
+		{
+		b"--maximised" => {maximised = true;},
+		_ => {
+			kernel_log!("Unknown arg {:?}", arg);
+			},
+		}
+	}
 	
-	use syscalls::threads::{S_THIS_PROCESS,ThisProcessWaits};
-	::syscalls::threads::wait(&mut [S_THIS_PROCESS.get_wait(ThisProcessWaits::new().recv_obj())], !0);
-	::syscalls::gui::set_group( S_THIS_PROCESS.receive_object::<Group>(0).unwrap() );
+	::wtk::initialise();
+
+	let mut shell = ShellState::new();
+	let mut input = input::InputStack::new();
+	let term_ele = terminal_element::TerminalElement::new(
+		|_window, term, ev|
+		if let Some(buf) = input.handle_event(ev, |a| render_input(term, a))
+		{
+			kernel_log!("buf = {:?}", buf);
+			term.write_str("\n");
+
+			// XXX: Lazy option really... would maybe be cleaner to either have a flag in `shell` or just explicitly
+			//      exit when the exit command is invoked
+			if buf == "exit" {
+				::syscalls::threads::exit(0);
+			}
+
+			shell.handle_command(term, buf);
+			// - If the command didn't print a newline, print one for it
+			if term.cur_col() != 0 {
+				term.write_str("\n");
+			}
+			// New prompt
+			term.write_str("> ");
+		}
+		);
 
 	// Create maximised window
-	let window = Window::new("Console").unwrap();
-	window.maximise();
-	window.fill_rect(0,0, !0,!0, 0x33_00_00);   // A nice rust-like red :)
+	let decorator = if maximised { None } else { Some(::wtk::decorator::Standard::default()) };
+	let mut window = ::wtk::Window::new("Console", &term_ele, ::wtk::Colour::from_argb32(0x330000), decorator).unwrap();
+	if maximised {
+		window.maximise();
+	}
+	else {
+		window.set_pos(50, 50);
+		window.set_dims(160*8+10, 25*16+20);
+		window.set_title("Console");
+	}
 
 	// Create terminal
-	let mut term = terminal::Terminal::new(&window, ::syscalls::gui::Rect::new(0,0, 1920,1080));
-	let mut input = input::InputStack::new();
 	// Print header
 	{
 		let mut buf = [0; 128];
-		term.set_foreground( Colour::def_green() );
-		let _ = write!(&mut term, "{}\n",  ::syscalls::get_text_info(::syscalls::TEXTINFO_KERNEL, 0, &mut buf));	// Kernel 0: Version line
-		term.set_foreground( Colour::def_yellow() );
-		let _ = write!(&mut term, " {}\n", ::syscalls::get_text_info(::syscalls::TEXTINFO_KERNEL, 1, &mut buf));	// Kernel 1: Build line
-		term.set_foreground( Colour::white() );
-		let _ = write!(&mut term, "Simple console\n");
+		term_ele.set_foreground( Colour::from_argb32(0x00FF00) );
+		let _ = write!(term_ele, "{}\n",  ::syscalls::get_text_info(::syscalls::TextInfo::Kernel, 0, &mut buf));	// Kernel 0: Version line
+		term_ele.set_foreground( Colour::from_argb32(0xFFFF00) );
+		let _ = write!(term_ele, " {}\n", ::syscalls::get_text_info(::syscalls::TextInfo::Kernel, 1, &mut buf));	// Kernel 1: Build line
+		term_ele.set_foreground( Colour::from_argb32(0xFFFFFF) );
+		let _ = write!(term_ele, "Simple console\n");
 	}
-	window.show();
-	
 	// Initial prompt
-	term.write_str("> ").unwrap();
-	term.flush();
+	term_ele.write_str("> ");
 
-	let mut shell = ShellState::new();
+	window.focus(&term_ele);
+	window.show();
 
-	loop {
-		// Bind to receive events relating to the window
-		let mut events = [window.get_wait( ::syscalls::gui::WindowWaits::new().input() )];
-		
-		::syscalls::threads::wait(&mut events, !0);
-	
-		while let Some(ev) = window.pop_event()
-		{
-			if let Some(buf) = input.handle_event(ev, |a| render_input(&mut term, a))
-			{
-				kernel_log!("buf = {:?}", buf);
-				term.write_str("\n").unwrap();
-				term.flush();
-				window.redraw();
-
-				// XXX: Lazy option really... would maybe be cleaner to either have a flag in `shell` or just explicitly
-				//      exit when the exit command is invoked
-				if buf == "exit" {
-					return ;
-				}
-
-				shell.handle_command(&mut term, buf);
-				// - If the command didn't print a newline, print one for it
-				if term.cur_col() != 0 {
-					term.write_str("\n").unwrap();
-				}
-				// New prompt
-				term.write_str("> ").unwrap();
-			}
-			term.flush();
-			window.redraw();
-		}
-		
-		window.check_wait(&events[0]);
-	}
+	::r#async::idle_loop(&mut [
+		&mut window,
+		]);
 }
 
+
 // Render callback for input stack
-fn render_input(term: &mut terminal::Terminal, action: input::Action)
+fn render_input<T: Terminal>(term: &T, action: input::Action)
 {
 	use input::Action;
 	match action
 	{
 	Action::Backspace => term.delete_left(),
 	Action::Delete => term.delete_right(),
-	Action::Puts(s) => term.write_str(s).unwrap(),
+	Action::Puts(s) => term.write_str(s),
+	Action::CursorLeft => term.cursor_left(), 
+	Action::CursorRight => term.cursor_right(),
 	}
 }
 
-#[derive(Default)]
 struct ShellState
 {
+	/// Root directory handle
+	root_handle: ::syscalls::vfs::Dir,
+
 	/// Current working directory, relative to /
 	cwd_rel: String,
-}
-
-
-macro_rules! print {
-	($term:expr, $($t:tt)*) => ({use std::fmt::Write; let _ = write!($term, $($t)*);});
 }
 
 impl ShellState
 {
 	pub fn new() -> ShellState {
-		Default::default()
+		ShellState {
+			cwd_rel: Default::default(),
+			root_handle: ::syscalls::vfs::root().clone(),
+			}
 	}
 	/// Handle a command
-	pub fn handle_command(&mut self, term: &mut terminal::Terminal, mut cmdline: String)
+	pub fn handle_command<T: Terminal>(&mut self, term: &T, mut cmdline: String)
 	{
-		use cmdline_words_parser::StrExt;
-		let mut args = cmdline.parse_cmdline_words();
+		let mut args = cmdline_words_parser::parse_posix(&mut cmdline);
 		match args.next()
 		{
 		None => {},
 		// 'pwd' - Print working directory
-		Some("pwd") => print!(term, "/{}", self.cwd_rel),
+		Some("pwd") => write!(term, "/{}", self.cwd_rel),
 		// 'cd' - Change directory
 		Some("cd") =>
-			if let Some(p) = args.next()
-			{
-				print!(term, "TODO: cd '{}'", p);
+			if let Some(p) = args.next() {
+				write!(term, "TODO: cd '{}'", p);
 			}
-			else
-			{
+			else {
 				self.cwd_rel = String::new();
 			},
 		// 'ls' - Print the contents of a directory
 		Some("ls") =>
-			if let Some(dir) = args.next()
-			{
+			if let Some(dir) = args.next() {
 				// TODO: Parse 'dir' as relative correctly
-				command_ls(term, dir);
+				command_ls(term, &self.root_handle, dir);
 			}
-			else
-			{
-				command_ls(term, &format!("/{}", self.cwd_rel));
+			else {
+				command_ls(term, &self.root_handle, &format!("/{}", self.cwd_rel));
 			},
 		// 'cat' - Dump the contents of a file
 		// TODO: Implement
-		Some("cat") => print!(term, "TODO: cat"),
+		Some("cat") => write!(term, "TODO: cat"),
 		// 'echo' - Prints all arguments space-separated
 		Some("echo") =>
 			while let Some(v) = args.next() {
-				print!(term, "{} ", v);
+				write!(term, "{} ", v);
 			},
 		Some("help") => {
-			print!(term, "Builtins: pwd, cd, ls, cat, help, echo");
+			write!(term, "Builtins: pwd, cd, ls, cat, help, echo");
 			},
-		Some(cmd @_) => {
-			print!(term, "Unkown command '{}'", cmd);
+		Some(cmd @ _) => {
+			write!(term, "Unknown command '{}'", cmd);
 			},
 		}
 	}
 }
 
 /// List the contents of a directory
-fn command_ls(term: &mut terminal::Terminal, path: &str)
+fn command_ls<T: ::Terminal>(term: &T, root: &::syscalls::vfs::Dir, path: &str)
 {
-	use syscalls::vfs::{NodeType, Node, Dir, File, Symlink};
-	let mut handle = match Dir::open(path)
+	use syscalls::vfs::{NodeType, FileOpenMode};
+	write!(term, "Listing {:?}\n", path);
+	let handle = match root.open_child_path(path)
 		{
-		Ok(v) => v,
+		Ok(v) => match v.into_dir()
+			{
+			Ok(v) => v,
+			Err(e) => {
+				write!(term, "Unable to open '{}': {:?}\n", path, e);
+				return ;
+				},
+			},
 		Err(e) => {
-			print!(term, "Unable to open '{}': {:?}", path, e);
+			write!(term, "Unable to open '{}': {:?}\n", path, e);
 			return ;
 			},
 		};
+	let mut iter = handle.enumerate().unwrap();
 	
 	let mut buf = [0; 256];
 	loop
 	{
-		let name_bytes = match handle.read_ent(&mut buf)
+		let name_bytes = match iter.read_ent(&mut buf)
 			{
-			Ok(v) => v,
+			Ok(Some(v)) => v,
+			Ok(None) => break,
 			Err(e) => {
-				print!(term, "Read error: {:?}", e);
+				write!(term, "Read error: {:?}", e);
 				return ;
 				},
 			};
-		if name_bytes == b"" { break ; }
 
 		let name = ::std::str::from_utf8(name_bytes).expect("Filename not utf-8");
 
-		print!(term, "- {}", name);
+		write!(term, "- {}", name);
 
-		let file_node = match Node::open(&format!("{}/{}", if path != "/" { path } else { "" }, name)[..])//handle.open_node(node_id)
+		let file_node = match handle.open_child(name)
 			{
 			Ok(v) => v,
 			Err(e) => {
-				print!(term, "(Error: {:?})\n", e);
+				write!(term, "(Error: {:?})\n", e);
 				continue ;
 				},
 			};
 		match file_node.class()
 		{
-		NodeType::File => {},
-		NodeType::Dir => print!(term, "/"),
+		NodeType::File => {
+			let size = file_node.into_file(FileOpenMode::ReadOnly).and_then(|h| Ok(h.get_size())).unwrap_or(0);
+			write!(term, " ({})", size);
+			},
+		NodeType::Dir => write!(term, "/"),
 		NodeType::Symlink => {
 			let mut link_path_buf = [0; 256];
 			let dest = match file_node.into_symlink().and_then(|h| h.read_target(&mut link_path_buf))
 				{
 				Ok(v) => v,
-				Err(e) => { print!(term, "(Error: {:?})\n", e); continue ; },
+				Err(e) => { write!(term, "(Error: {:?})\n", e); continue ; },
 				};
-			print!(term, " => {:?}", ::std::str::from_utf8(dest));
+			write!(term, " => {:?}", ::std::str::from_utf8(dest));
 			},
-		NodeType::Special => print!(term, "*"),
+		NodeType::Special => write!(term, "*"),
 		}
-		print!(term, "\n");
+		write!(term, "\n");
 	}
 }
-

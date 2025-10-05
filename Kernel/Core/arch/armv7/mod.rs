@@ -1,6 +1,8 @@
+// "Tifflin" Kernel
+// - By John Hodge (Mutabah/thePowersGang)
 //
-//
-//
+// Core/arch/armv7/mod.rs
+//! ARMv7-A architecture bindings
 
 module_define!{arch, [], init}
 
@@ -12,11 +14,9 @@ pub mod interrupts;
 
 pub mod boot;
 
-pub mod pci;
-
 pub mod threads;
 
-mod fdt;
+mod gic;
 mod fdt_devices;
 
 mod aeabi_unwind;
@@ -24,12 +24,12 @@ mod aeabi_unwind;
 #[inline(always)]
 pub fn checkmark() {
 	// SAFE: nop ASM
-	unsafe { asm!("mov r1, r1" : : : "memory" : "volatile"); }
+	unsafe { ::core::arch::asm!("mov r1, r1"); }
 }
 #[inline(always)]
 pub fn checkmark_val<T>(v: *const T) {
 	// SAFE: nop ASM
-	unsafe { asm!("mov r1, r1; mov $0,$0" : : "r"(v) : "memory" : "volatile"); }
+	unsafe { ::core::arch::asm!("mov r1, r1; mov {0},{0}", in(reg) v); }
 }
 
 #[allow(improper_ctypes)]
@@ -39,11 +39,14 @@ extern "C" {
 
 fn init()
 {
+	// Init interrupts before the GIC to ensure mappings are enabled
 	interrupts::init();
+	// Start the FDT bus enumeration, informing it of the interrupt controller
+	fdt_devices::init(interrupts::get_intc);
 }
 
 #[no_mangle]
-pub unsafe extern fn hexdump(base: *const u8, size: usize) {
+pub unsafe extern "C" fn hexdump(base: *const u8, size: usize) {
 	puts("hexdump("); puth(base as usize as u64); puts(", "); puth(size as u64); puts("): ");
 	for i in 0 .. size {
 		let v = *base.offset(i as isize);
@@ -106,8 +109,23 @@ pub fn puth(v: u64) {
 	}
 }
 
-pub fn cur_timestamp() -> u64 {
+pub mod time {
+	pub fn cur_timestamp() -> u64 {
+		0
+	}
+	pub fn request_tick(time: u64) {
+		todo!("request_tick({})", time);
+	}
+}
+
+pub fn cpu_num() -> u32 {
 	0
+}
+pub fn halt() -> ! {
+	loop {}
+}
+pub fn reboot() -> ! {
+	loop {}
 }
 
 pub fn print_backtrace() {
@@ -121,9 +139,9 @@ fn print_backtrace_unwindstate(mut rs: aeabi_unwind::UnwindState, mut addr: usiz
 	{
 		//log_debug!("addr={:#x} fcn={:#x}, info={:#x}", addr, info.0, info.1);
 		// - Subtract 1 to avoid 'bl' at the end of a function tricking the resolution
-		match ::symbols::get_symbol_for_addr(addr-1)
+		match crate::symbols::get_symbol_for_addr(addr-1)
 		{
-		Some( (name,ofs) ) => log_debug!("> {:#x} {}+{:#x}", addr, ::symbols::Demangle(name), ofs+1),
+		Some( (name,ofs) ) => log_debug!("> {:#x} {}+{:#x}", addr, crate::symbols::Demangle(name), ofs+1),
 		None => log_debug!("> {:#x}", addr),
 		}
 		match rs.unwind_step(info.1)
@@ -143,80 +161,10 @@ fn print_backtrace_unwindstate(mut rs: aeabi_unwind::UnwindState, mut addr: usiz
 	log_debug!("- LR={:#x}", rs.get_lr());
 }
 
+pub use crate::arch::helpers::x86_io_unavailable as x86_io;
 
-#[repr(C)]
-pub struct AbortRegs
-{
-	sp: u32,
-	lr: u32,
-	gprs: [u32; 13],	// R0-R12
-	_unused: u32,	// Padding (actually R0)
-	ret_pc: u32,	// SRSFD/RFEFD state
-	spsr: u32,
-}
-#[no_mangle]
-pub fn data_abort_handler(pc: u32, reg_state: &AbortRegs, dfar: u32, dfsr: u32) {
-
-	log_warning!("Data abort by {:#x} address {:#x} status {:#x}", pc, dfar, dfsr);
-	//log_debug!("Registers:");
-	//log_debug!("R 0 {:08x}  R 1 {:08x}  R 2 {:08x}  R 3 {:08x}  R 4 {:08x}  R 5 {:08x}}  R 6 {:08x}", reg_state.gprs[0]);
-	
-	let rs = aeabi_unwind::UnwindState::from_regs([
-		reg_state.gprs[0], reg_state.gprs[1], reg_state.gprs[ 2], reg_state.gprs[3],
-		reg_state.gprs[4], reg_state.gprs[5], reg_state.gprs[ 6], reg_state.gprs[7],
-		reg_state.gprs[8], reg_state.gprs[9], reg_state.gprs[10], reg_state.gprs[11],
-		reg_state.gprs[12], reg_state.sp, reg_state.lr, reg_state.ret_pc,
-		]);
-	print_backtrace_unwindstate(rs, pc as usize);
-}
-fn fsr_name(ifsr: u32) -> &'static str {
-	match ifsr & 0x40F
-	{
-	0x001 => "Alignment fault",
-	0x004 => "Instruction cache maintainence",
-	0x00C => "Sync Ext abort walk lvl1",
-	0x00E => "Sync Ext abort walk lvl2",
-	0x40C => "Sync Ext pairity walk lvl1",
-	0x40E => "Sync Ext pairity walk lvl2",
-	0x005 => "Translation fault lvl1",
-	0x007 => "Translation fault lvl2",
-	0x003 => "Access flag fault lvl1",
-	0x006 => "Access flag fault lvl2",
-	0x009 => "Domain fault lvl1",
-	0x00B => "Domain fault lvl2",
-	0x00D => "Permissions fault lvl1",
-	0x00F => "Permissions fault lvl2",
-	_ => "undefined",
-	}
-}
-#[no_mangle]
-pub fn prefetch_abort_handler(pc: u32, reg_state: &AbortRegs, ifsr: u32) {
-	log_warning!("Prefetch abort at {:#x} status {:#x} ({}) - LR={:#x}", pc, ifsr, fsr_name(ifsr), reg_state.lr);
-	//log_debug!("Registers:");
-	//log_debug!("R 0 {:08x}  R 1 {:08x}  R 2 {:08x}  R 3 {:08x}  R 4 {:08x}  R 5 {:08x}}  R 6 {:08x}", reg_state.gprs[0]);
-	
-	let rs = aeabi_unwind::UnwindState::from_regs([
-		reg_state.gprs[0], reg_state.gprs[1], reg_state.gprs[ 2], reg_state.gprs[3],
-		reg_state.gprs[4], reg_state.gprs[5], reg_state.gprs[ 6], reg_state.gprs[7],
-		reg_state.gprs[8], reg_state.gprs[9], reg_state.gprs[10], reg_state.gprs[11],
-		reg_state.gprs[12], reg_state.sp, reg_state.lr, reg_state.ret_pc,
-		]);
-	print_backtrace_unwindstate(rs, pc as usize);
-}
-
-pub mod x86_io {
-	pub unsafe fn inb(_p: u16) -> u8 { panic!("calling inb on ARM") }
-	pub unsafe fn inw(_p: u16) -> u16 { panic!("calling inw on ARM") }
-	pub unsafe fn inl(_p: u16) -> u32 { panic!("calling inl on ARM") }
-	pub unsafe fn outb(_p: u16, _v: u8) {}
-	pub unsafe fn outw(_p: u16, _v: u16) {}
-	pub unsafe fn outl(_p: u16, _v: u32) {}
-}
-
-
-
-#[allow(private_no_mangle_fns)]
 #[allow(dead_code)]
+#[cfg(any())]
 mod helpers
 {
 	#[repr(C)]
@@ -227,9 +175,9 @@ mod helpers
 		*rv = __aeabi_uldivmod(n, d);
 	}
 	fn __aeabi_uldivmod(mut n: u64, mut d: u64) -> ulldiv_t {
-		let mut ret = 0;
 		let mut add = 1;
 		while n / 2 >= d && add != 0 { d <<= 1; add <<= 1; }
+		let mut ret = 0;
 		while add > 0 { if n >= d { ret += add; n -= d; } add  >>= 1; d >>= 1; }
 	
 		ulldiv_t { quo: ret, rem: n, }

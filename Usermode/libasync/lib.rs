@@ -4,19 +4,22 @@
 //
 //! Asynchronous waiting support
 
-#[macro_use]
+//#[macro_use]
 extern crate syscalls;
 
 /// Trait for types that can be used for 'idle_loop'
 pub trait WaitController
 {
+	/// Return the number of times `populate` will call `cb`
 	fn get_count(&self) -> usize;
-	fn populate(&self, cb: &mut FnMut(::syscalls::WaitItem));
+	/// Populate a list of objects
+	fn populate(&self, cb: &mut dyn FnMut(::syscalls::WaitItem));
+	/// Called when the thread wakes up for any reason, `events` points to the `get_count()` objects created by `populate`
 	fn handle(&mut self, events: &[::syscalls::WaitItem]);
 }
 
 /// Idle, handling events on each WaitController passed
-pub fn idle_loop(items: &mut [&mut WaitController])
+pub fn idle_loop<'a,'b,'c>(items: &'a mut [&'b mut (dyn WaitController+'c)])
 {
 	let mut objects = Vec::new();
 	loop {

@@ -2,22 +2,23 @@
 // - By John Hodge (thePowersGang)
 //
 // Core/prelude.rs
-/// Common global definitons
+/// Common global definitions
 ///
 /// All files have 'use prelude::*' as the first line, which imports the names from this module
 // Recreate std::prelude
 pub use core::prelude::*;
 
-pub use lib::mem::boxed::Box;
-//pub use lib::borrow::ToOwned;
-pub use lib::vec::Vec;
-pub use lib::string::String;
+pub use crate::lib::mem::boxed::Box;
+
+pub use ::alloc::borrow::ToOwned;
+pub use crate::lib::vec::Vec;
+pub use crate::lib::string::String;
 
 
 // - Not in core::prelude, but I like them
 pub use core::any::Any;
 
-pub use lib::collections::{MutableSeq};
-pub use logging::HexDump;
+pub use crate::lib::collections::{MutableSeq};
+pub use crate::logging::HexDump;
 
 // vim: ft=rust

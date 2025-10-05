@@ -1,0 +1,21 @@
+[package]
+name = "syscalls"
+version = "0.0.0"
+edition = "2018"
+
+[lib]
+path = "lib.rs"
+
+[features]
+native = []
+
+[dependencies]
+stack_dst = { version = "0.7.2", default-features = false }
+kernel = { path = "../../Core" }
+vfs = { path = "../vfs" }
+gui = { path = "../gui" }
+network = { path = "../network" }
+syscall_values = { path = "../../../Shared/syscall_values" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(in_ide)'] }

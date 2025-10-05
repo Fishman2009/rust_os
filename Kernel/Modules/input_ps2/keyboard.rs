@@ -17,6 +17,7 @@ pub enum Type
 #[derive(Debug)]
 enum State
 {
+	Disabled,
 	Init(Init),
 	Idle(Layer,bool),
 }
@@ -28,19 +29,20 @@ enum Layer
 	E1,
 }
 #[derive(Copy,Clone,Debug)]
-#[allow(dead_code)]	// SetLeds is unused... at the moment
 enum Init
 {
-	Disabled,
+	/// 0xF0 sent, waiting for 0xFA
 	ReqScancodeSetAck,
+	/// 0x00 sent, waiting for code (may also get 0xFA)
 	ReqScancodeSetRsp,
-	SetLeds(u8),
+	/// 0xF4 sent, waiting for 0xFA
+	EnableAck,
 }
 
 #[derive(Debug)]
 pub struct Dev
 {
-	ty: Type,
+	_ty: Type,
 	state: State,
 	guidev: gui_keyboard::Instance,
 }
@@ -55,16 +57,16 @@ impl Dev
 		{
 		//Type::AT => {
 		//	log_warning!("Unexpected AT keyboard");
-		//	return (None, Dev { ty: ty, state: State::Init(Init::Disabled), guidev: Default::default() });
+		//	return (None, Dev { ty: ty, state: State::Disabled, guidev: Default::default() });
 		//	},
 		Type::MF2Emul => {
 			log_warning!("Unexpected emulation enabled MF2");
-			return (None, Dev { ty: ty, state: State::Init(Init::Disabled), guidev: Default::default() });
+			return (None, Dev { _ty: ty, state: State::Disabled, guidev: Default::default() });
 			},
 		Type::MF2 => {
 			// 1. Request scancode set
 			(Some(0xF0), Dev {
-				ty: ty,
+				_ty: ty,
 				state: State::Init(Init::ReqScancodeSetAck),
 				guidev: gui_keyboard::Instance::new(),
 				})
@@ -78,12 +80,16 @@ impl Dev
 	pub fn recv_byte(&mut self, byte: u8) -> Option<u8> {
 		match self.state
 		{
+		State::Disabled => {
+			log_debug!("Disabled keyboard {:#02x}", byte);
+			None
+			},
 		// Non-active states (mostly initiailsation)
 		State::Init(s) =>
 			match s
 			{
-			Init::Disabled => None,
 			Init::ReqScancodeSetAck => {
+				log_debug!("ACK ReqScancodeSet");
 				self.state = State::Init(Init::ReqScancodeSetRsp);
 				Some(0x00)
 				},
@@ -93,29 +99,44 @@ impl Dev
 				// Scancode set 1
 				1 /*0x43*/ => {
 					log_warning!("TODO: Support scancode set 1");
-					self.state = State::Init(Init::Disabled);
+					self.state = State::Disabled;
 					None
 					},
 				// Scancode set 2 (most common)
 				2 /*0x41*/ => {
-					self.state = State::Idle(Layer::Base,false);
-					None
+					log_debug!("Keyboard ready, scancode set 2");
+					self.state = State::Init(Init::EnableAck);
+					Some(0xF4)	// Enable scanning
 					},
 				// Scancode set 3 (newest)
 				3 /*0x3F*/ => {
 					log_warning!("TODO: Support scancode set 3");
-					self.state = State::Init(Init::Disabled);
+					self.state = State::Disabled;
+					None
+					},
+				0xFA => {
+					// This is kinda expected?
+					log_warning!("Received second ACK for ReqScancodeSetRsp {:#02x}", byte);
 					None
 					},
 				_ => {
-					log_warning!("Unkown scancode set reponse {:#02x}", byte);
-					self.state = State::Init(Init::Disabled);
+					log_warning!("Unknown scancode set response {:#02x}", byte);
+					self.state = State::Disabled;
 					None
 					},
 				},
-			Init::SetLeds(v) => {
-				self.state = State::Idle(Layer::Base,false);
-				Some(v)
+			Init::EnableAck =>
+				match byte
+				{
+				0xFA => {
+					self.state = State::Idle(Layer::Base,false);
+					None
+					},
+				_ => {
+					log_warning!("Unknown scancode set response {:#02x}", byte);
+					self.state = State::Disabled;
+					None
+					},
 				},
 			},
 		// Idle and ready to process keystrokes
@@ -211,7 +232,7 @@ mod keymaps {
 		None, RightAlt, None, None, RightCtrl, None, None, None,
 		None, None, None, None, None, None, None, LeftGui,
 		None, None, None, None, None, None, None, RightGui,
-		None, None, None, None, None, None, None, None,
+		None, None, None, None, None, None, None, Application,	// Application = Menu
 		None, None, None, None, None, None, None, None,
 		None, None, None, None, None, None, None, None,
 		None, None, None, None, None, None, None, None,

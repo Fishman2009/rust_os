@@ -11,7 +11,7 @@ OBJDIR := .obj/$(TRIPLE)/
 
 SRCS := $(wildcard $(SRCDIR)components/*/*.c)
 SRCS := $(filter-out $(SRCDIR)components/disassembler/%,$(SRCS))
-SRCS += $(SRCDIR)components/hardware/hwacpi.c
+#SRCS += $(SRCDIR)components/hardware/hwacpi.c
 #SRCS += $(SRCDIR)common/ahuuids.c $(SRCDIR)common/ahids.c
 #SRCS += $(SRCDIR)compiler/aslmapenter.c
 OBJS := $(SRCS:$(SRCDIR)%.c=$(OBJDIR)%.o)
@@ -24,6 +24,7 @@ CPPFLAGS += -D ACPI_DEBUG_OUTPUT=1
 CFLAGS := -ffreestanding
 ifeq ($(ARCH),amd64)
 CFLAGS += -mcmodel=kernel -mno-red-zone
+CFLAGS += -mno-sse
 endif
 CFLAGS += -O2
 
@@ -37,7 +38,7 @@ clean:
 srcdir: $(SRCDIR)
 
 $(TARBALL):
-	if [ ! -e $(TARBALL) ]; then wget $(TARBALL_URL) --no-check-certificate -O $@; fi
+	if [ ! -e $(TARBALL) ]; then curl -s -k $(TARBALL_URL) -o $@ ; fi
 
 $(SRCDIR): $(TARBALL)
 	tar -xf $(TARBALL)

@@ -3,25 +3,45 @@
 //
 // arch/amd64/sync.rs
 //! Low-level synchronisaion primitives
-use core::sync::atomic::{AtomicBool,Ordering};
+use core::sync::atomic::{AtomicU32,Ordering};
+use super::cpu_num;
 
 const TRACE_IF: bool = false;
 //const TRACE_IF: bool = true;
 
 /// Lightweight protecting spinlock
-pub struct Spinlock<T: Send>
+pub struct SpinlockInner
 {
-	#[doc(hidden)]
-	pub lock: AtomicBool,
-	#[doc(hidden)]
-	pub value: ::core::cell::UnsafeCell<T>,
+	lock: AtomicU32,
 }
-unsafe impl<T: Send> Sync for Spinlock<T> {}
 
-/// Handle to the held spinlock
-pub struct HeldSpinlock<'lock,T:'lock+Send>
+impl SpinlockInner
 {
-	lock: &'lock Spinlock<T>,
+	pub const fn new() -> Self {
+		SpinlockInner {
+			lock: AtomicU32::new(0),
+		}
+	}
+	
+	pub fn try_inner_lock_cpu(&self) -> bool
+	{
+		match self.lock.compare_exchange(0, cpu_num()+1, Ordering::Acquire, Ordering::Relaxed)
+		{
+		Ok(_) => { ::core::sync::atomic::fence(Ordering::Acquire); true }
+		Err(x) if x == cpu_num()+1 => false,
+		Err(_) => { self.inner_lock(); true },
+		}
+	}
+	pub fn inner_lock(&self) {
+		while self.lock.compare_exchange(0, cpu_num()+1, Ordering::Acquire, Ordering::Relaxed).is_err()
+		{
+		}
+		::core::sync::atomic::fence(Ordering::Acquire);
+	}
+	pub unsafe fn inner_release(&self) {
+		::core::sync::atomic::fence(Ordering::Release);
+		self.lock.store(0, Ordering::Release);
+	}
 }
 
 /// A handle for frozen interrupts
@@ -34,115 +54,26 @@ pub struct HeldInterrupts(bool);
 //	irqs: HeldInterrupts,
 //}
 
-impl<T: Send> Spinlock<T>
-{
-	/// Create a new spinning lock
-	pub const fn new(val: T) -> Spinlock<T> {
-		Spinlock {
-			lock: ::core::sync::atomic::ATOMIC_BOOL_INIT, //AtomicBool::new(false),
-			value: ::core::cell::UnsafeCell::new(val),
-		}
-	}
-	
-	/// Lock this spinning lock
-	#[tag_unsafe(irq)]
-	pub fn lock(&self) -> HeldSpinlock<T>
-	{
-		self.inner_lock();
-		HeldSpinlock { lock: self }
-	}
-
-	/// Lock this spinning lock (accepting risk of panick/deadlock from IRQs)
-	#[tag_safe(irq)]
-	pub fn lock_irqsafe(&self) -> HeldSpinlock<T> {
-		self.inner_lock();
-		HeldSpinlock { lock: self }
-	}
-	/// Attempt to acquire the lock, returning None if it is already held by this CPU
-	#[tag_safe(irq)]
-	pub fn try_lock_cpu(&self) -> Option<HeldSpinlock<T>>
-	{
-		//if self.lock.compare_and_swap(0, cpu_num()+1, Ordering::Acquire) == 0
-		if self.lock.compare_and_swap(false, true, Ordering::Acquire) == false
-		{
-			Some( HeldSpinlock { lock: self } )
-		}
-		else
-		{
-			None
-		}
-	}
-	
-	fn inner_lock(&self) {
-		//while self.lock.compare_and_swap(0, cpu_num()+1, Ordering::Acquire) != 0
-		while self.lock.compare_and_swap(false, true, Ordering::Acquire) == true
-		{
-		}
-		::core::sync::atomic::fence(Ordering::Acquire);
-	}
-	fn inner_release(&self) {
-		//::arch::puts("Spinlock::release()\n");
-		::core::sync::atomic::fence(Ordering::Release);
-		self.lock.store(false, Ordering::Release);
-	}
-}
-// Some special functions on non-wrapping spinlocks
-impl Spinlock<()>
-{
-	pub unsafe fn unguarded_lock(&self) {
-		self.inner_lock()
-	}
-	pub unsafe fn unguarded_release(&self) {
-		self.inner_release()
-	}
-}
-impl<T: Send+Default> Default for Spinlock<T>
-{
-	fn default() -> Self {
-		Spinlock::new(Default::default())
-	}
-}
-
-impl<'lock,T: Send> ::core::ops::Drop for HeldSpinlock<'lock, T>
-{
-	fn drop(&mut self)
-	{
-		self.lock.inner_release();
-	}
-}
-
-impl<'lock,T: Send> ::core::ops::Deref for HeldSpinlock<'lock, T>
-{
-	type Target = T;
-	fn deref<'a>(&'a self) -> &'a T {
-		// SAFE: & to handle makes & to value valid
-		unsafe { &*self.lock.value.get() }
-	}
-}
-impl<'lock,T: Send> ::core::ops::DerefMut for HeldSpinlock<'lock, T>
-{
-	fn deref_mut<'a>(&'a mut self) -> &'a mut T {
-		// SAFE: &mut to handle makes &mut to value valid
-		unsafe { &mut *self.lock.value.get() }
-	}
-}
 
 /// Prevent interrupts from firing until return value is dropped
+// TODO: What if there's two instances created, with different lifetimes?
+// ```
+// let a = hold_interrupts();
+// let b = hold_interrupts();
+// drop(a);	// <-- Enables interrupts
+// drop(b);
+// ```
 pub fn hold_interrupts() -> HeldInterrupts
 {
 	// SAFE: Correct inline assembly
-	let if_set = unsafe {
-		let flags: u64;
-		asm!("pushf; pop $0; cli" : "=r" (flags) : : "memory" : "volatile");
-		(flags & 0x200) != 0
-		};
+	let if_set = unsafe { test_and_stop_interrupts() };
 	
 	if TRACE_IF {
 		if if_set {
-			::arch::puts("hold_interrupts() - IF cleared\n");
+			crate::arch::puts("hold_interrupts() - IF cleared\n");
 		}
 		else {
-			::arch::puts("hold_interrupts() - IF maintained\n");
+			crate::arch::puts("hold_interrupts() - IF maintained\n");
 		}
 	}
 	HeldInterrupts(if_set)
@@ -154,18 +85,30 @@ impl ::core::ops::Drop for HeldInterrupts
 	{
 		if TRACE_IF {
 			if self.0 {
-				::arch::puts("HeldInterrupts::drop() - IF set\n");
+				crate::arch::puts("HeldInterrupts::drop() - IF set\n");
 			}
 			else {
-				::arch::puts("HeldInterrupts::drop() - IF maintained\n");
+				crate::arch::puts("HeldInterrupts::drop() - IF maintained\n");
 			}
 		}
 		
 		if self.0 {
 			// SAFE: Just re-enables interrupts
-			unsafe { asm!("sti" : : : "memory" : "volatile"); }
+			unsafe { start_interrupts() }
 		}
 	}
+}
+
+pub unsafe fn test_and_stop_interrupts() -> bool {
+	let flags: u64;
+	::core::arch::asm!("pushf; pop {}; cli", out(reg) flags);	// touches stack
+	(flags & 0x200) != 0
+}
+pub unsafe fn stop_interrupts() {
+	::core::arch::asm!("cli", options(nomem, nostack));
+}
+pub unsafe fn start_interrupts() {
+	::core::arch::asm!("sti", options(nomem, nostack));
 }
 
 // vim: ft=rust

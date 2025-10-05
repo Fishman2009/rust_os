@@ -8,39 +8,53 @@
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
 	let ret : u8;
-	asm!("inb %dx, %al" : "={ax}"(ret) : "{dx}"(port) : : "volatile");
+	::core::arch::asm!("in al, dx", out("al") ret, in("dx") port, options(preserves_flags, nomem, nostack));
 	return ret;
 }
 /// Write a single byte
 #[inline]
 pub unsafe fn outb(port: u16, val: u8) {
-	asm!("outb %al, %dx" : : "{dx}"(port), "{al}"(val) : : "volatile");
+	::core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(preserves_flags, nomem, nostack));
 }
 
 /// Read a 16-bit word
 #[inline]
 pub unsafe fn inw(port: u16) -> u16 {
 	let ret : u16;
-	asm!("inw %dx, %ax" : "={ax}"(ret) : "{dx}"(port) : : "volatile");
+	::core::arch::asm!("in ax, dx", out("ax") ret, in("dx") port, options(preserves_flags, nomem, nostack));
 	return ret;
 }
 /// Write a 16-bit word
 #[inline]
 pub unsafe fn outw(port: u16, val: u16) {
-	asm!("outw %ax, %dx" : : "{dx}"(port), "{ax}"(val) : : "volatile");
+	::core::arch::asm!("out dx, ax", in("dx") port, in("ax") val, options(preserves_flags, nomem, nostack));
 }
 
 /// Read a 32-bit long/double-word
 #[inline]
 pub unsafe fn inl(port: u16) -> u32 {
 	let ret : u32;
-	asm!("inl %dx, %eax" : "={eax}"(ret) : "{dx}"(port) : : "volatile");
+	::core::arch::asm!("in eax, dx", out("eax") ret, in("dx") port, options(preserves_flags, nomem, nostack));
 	return ret;
 }
 /// Write a 32-bit long/double-word
 #[inline]
 pub unsafe fn outl(port: u16, val: u32) {
-	asm!("outl %eax, %dx" : : "{dx}"(port), "{eax}"(val) : : "volatile");
+	::core::arch::asm!("out dx, eax", in("dx") port, in("eax") val, options(preserves_flags, nomem, nostack));
+}
+/// Read a 64-bit quad-word
+#[inline]
+#[cfg(false_)]
+pub unsafe fn inq(port: u16) -> u64 {
+	let ret : u64;
+	::core::arch::asm!("in rax, dx", out("rax") ret, in("dx") port, options(preserves_flags, nomem, nostack));
+	return ret;
+}
+/// Write a 64-bit quad-word
+#[inline]
+#[cfg(false_)]
+pub unsafe fn outq(port: u16, val: u64) {
+	::core::arch::asm!("out dx, rax", in("dx") port, in("rax") val, options(preserves_flags, nomem, nostack));
 }
 
 // vim: ft=rust

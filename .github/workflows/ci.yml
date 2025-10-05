@@ -1,0 +1,32 @@
+name: Rust
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    - cron: '45 10 * * 2' # 18:45 UCY+8 on Tuesday
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: ilammy/setup-nasm@v1
+    - uses: actions/checkout@v2
+    - uses: actions-rs/toolchain@v1
+      with:
+        toolchain: nightly
+    - name: fetch
+      run: |
+        mkdir -p _archives
+        (cd _archives && wget -c http://tpg.ucc.asn.au/tifflin_build_tools.tar.bz2)
+        tar -xf _archives/tifflin_build_tools.tar.bz2
+    - name: init
+      run: |
+        make UPDATE
+        make EXTERNALS
+    - name: build
+      run: |
+        make all USE_ACPICA=0

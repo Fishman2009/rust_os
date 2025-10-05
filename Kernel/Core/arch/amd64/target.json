@@ -1,14 +1,18 @@
 {
-	"data-layout": "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-s0:64:64-f80:128:128-n8:16:32:64-S128",
-	"llvm-target": "x86_64-unknown-linux-gnu",
+	"cpu": "x86-64",
+	"data-layout": "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+	"llvm-target": "x86_64-unknown-none",
 	"target-endian": "little",
 	"target-pointer-width": "64",
-	"target-word-size": "64",
+	"target-c-int-width": 32,
+	"features": "-mmx,-sse,+soft-float",
+	"rustc-abi": "x86-softfloat",
 	"os": "tifflin",
 	"arch": "x86_64",
-		"pre-link-args": ["-m64"],
-		"no-compiler-rt": true,
-		"disable-redzone": true,
-		"eliminate-frame-pointer": false,
-	"morestack": false
+	
+	"frame-pointer": "non-leaf",
+
+	"linker-flavor": "ld",
+	"pre-link-args": { "ld": ["-m64"] },
+	"disable-redzone": true
 }

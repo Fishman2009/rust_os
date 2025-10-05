@@ -1,0 +1,26 @@
+[package]
+name = "native_kernel"
+version = "0.0.0"
+edition = "2018"
+default-run = "native_kernel"
+
+[dependencies]
+kernel = { path = "../Kernel/Core", features = ["test"] }
+syscalls = { path = "../Kernel/Modules/syscalls", features = ["native"] }
+vfs = { path = "../Kernel/Modules/vfs", features = [] }
+gui = { path = "../Kernel/Modules/gui", features = [] }
+network = { path = "../Kernel/Modules/network", features = [] }
+
+libslirp = { version = "4.3.2", optional = true }
+ipnetwork = { version = "0.20.0", optional = true }
+mio = { version = "0.6.23", optional = true }
+pcap_writer = { path = "../Helpers/pcap_writer" }
+
+process-memory = "0.4"
+minifb = "0.28"
+
+[features]
+default = [
+	"network",
+	]
+network = ["libslirp", "ipnetwork", "mio"]

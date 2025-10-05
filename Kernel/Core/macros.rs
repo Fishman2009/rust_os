@@ -8,6 +8,12 @@ macro_rules! is
 	($val:expr, $p:pat) => ( match $val { $p => true, _ => false } );
 }
 
+/// Asserts a constant condition at compile-time
+#[macro_export]
+macro_rules! static_assert {
+	($cnd:expr) => { static _STATIC_ASSERT: [(); ($cnd) as usize] = [()]; }
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! _count
@@ -17,15 +23,20 @@ macro_rules! _count
 	($a:expr, $($b:expr),+) => {1+_count!($($b),+)};
 }
 
-/// Define a kernel module (creates the module header, containg the name and dependency strings)
+/// Define a kernel module (creates the module header, containing the name and dependency strings)
+///
+/// For external modules, at the module must be defined in the root (lib.rs)
+/// 
+/// E.g.
+/// ```
+/// module_define!(foomodule, [dep1, dep2], init_fcn_name);
+/// ```
 #[macro_export]
 macro_rules! module_define
 {
-	($name:ident, [$($deps:ident),*], $init:path) => (
-		//#[assume_reachable]
+	($name:ident, [ $( $(#[$da:meta])* $deps:ident ),*], $init:path) => (
 		#[doc(hidden)]
 		#[link_section = ".MODULE_LIST"]
-		#[linkage="external"]
 		#[allow(dead_code)]
 		pub static S_MODULE: $crate::modules::ModuleInfo = $crate::modules::ModuleInfo {
 			name: stringify!($name),
@@ -34,11 +45,16 @@ macro_rules! module_define
 			_rsvd: [0,0,0],
 		};
 		#[doc(hidden)]
-		static S_DEPS: [&'static str; _count!($($deps),*)] = [$(stringify!($deps)),*];
+		const S_DEPS: &'static [&'static str] = &[$( $(#[$da])* stringify!($deps) ),*];
+		// External linkage symbol, to force the module info to be maintained
+		#[linkage="external"]
+		#[doc(hidden)]
+		#[allow(dead_code)]
+		pub static S_MODULE_P: &$crate::modules::ModuleInfo = &S_MODULE;
 	);
 }
 
-/// Ensure that a type implments the provided trait
+/// Ensure that a type implements the provided trait
 ///
 /// Useful for "Send" and "Sync"
 #[macro_export]
@@ -48,10 +64,9 @@ macro_rules! assert_trait
 }
 
 #[doc(hidden)]
-#[tag_safe(irq)]
+//#[cfg_attr(not(test_shim),is_safe(irq))]
 pub fn type_name<T: ?::core::marker::Sized>() -> &'static str {
-	// SAFE: All intrinsics are unsafe, no matter how safe they really are
-	unsafe { ::core::intrinsics::type_name::<T>() }
+	::core::any::type_name::<T>()
 }
 /// A safe wrapper around the `type_name` intrinsic
 #[macro_export]
@@ -69,15 +84,17 @@ macro_rules! zip
 	($a:expr, $b:expr) => ( $a.zip($b) );
 }
 /// Iterator helper, desugars to a.chain(b).chain(b2)
+#[macro_export]
 macro_rules! chain
 {
-	($b:expr, $($b:expr),+) => ( $a$(.chain($b))+ );
+	($a:expr, $($b:expr),+) => ( $a$(.chain($b))+ );
 }
 
-/// Provides a short and noticable "TODO: " message
+/// Provides a short and noticeable "TODO: " message
 #[macro_export]
 macro_rules! todo
 {
+	() => ( panic!("TODO") );
 	( $s:expr ) => ( panic!( concat!("TODO: ",$s) ) );
 	( $s:expr, $($v:tt)* ) => ( panic!( concat!("TODO: ",$s), $($v)* ) );
 }
@@ -138,10 +155,11 @@ macro_rules! impl_from {
 /// Wait on a wait queue contained within a spinlock
 ///
 /// Due to lifetime issues, the more erganomical `lock.queue.wait(lock)` does not pass borrow checking.
+#[macro_export]
 macro_rules! waitqueue_wait_ext {
-	($lock:expr, $field:ident) => ({
+	($lock:expr, $(.$field:ident)+) => ({
 		let mut lock: $crate::arch::sync::HeldSpinlock<_> = $lock;
-		let irql = lock.$field.wait_int();
+		let irql = lock$(.$field)+.wait_int();
 		::core::mem::drop(lock);
 		::core::mem::drop(irql);
 		$crate::threads::reschedule();
@@ -150,7 +168,7 @@ macro_rules! waitqueue_wait_ext {
 
 /// Override libcore's `try!` macro with one that backs onto `From`
 #[macro_export]
-macro_rules! try {
+macro_rules! r#try {
 	($e:expr) => (
 		match $e {
 		Ok(v) => v,

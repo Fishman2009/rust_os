@@ -5,7 +5,7 @@
 //! x86 PS/2 controller (intel 8042)
 use kernel::prelude::*;
 
-use kernel::arch::{acpi,x86_io};
+use kernel::arch::{amd64::acpi,x86_io};
 use kernel::irqs;
 
 struct Port
@@ -17,8 +17,10 @@ struct Port
 #[derive(Default)]
 struct Ctrlr8042
 {
-	port1: Option< irqs::ObjectHandle<Port> >,
-	port2: Option< irqs::ObjectHandle<Port> >,
+	#[allow(dead_code)]
+	port1: Option< irqs::ObjectHandle >,
+	#[allow(dead_code)]
+	port2: Option< irqs::ObjectHandle >,
 }
 
 static S_8042_CTRLR: ::kernel::sync::mutex::LazyMutex<Ctrlr8042> = lazymutex_init!();
@@ -26,7 +28,7 @@ static S_8042_CTRLR: ::kernel::sync::mutex::LazyMutex<Ctrlr8042> = lazymutex_ini
 pub fn init()
 {
 	// 1. Check with ACPI is this machine has a PS2 controller
-	let enabled = if let Some(fadt) = acpi::find::<acpi::Fadt>("FACP", 0) {
+	let enabled = if let Some(fadt) = acpi::find::<acpi::tables::Fadt>("FACP", 0) {
 			let boot_architecture_flags = fadt.data().boot_architecture_flags;
 			if fadt.header().revision > 1 {
 				log_trace!("FADT boot_architecture_flags = {:#x}", boot_architecture_flags);
@@ -69,11 +71,9 @@ impl Port
 		}
 		c.write_data(b);
 	}
-}
 
-impl irqs::Handler for Port
-{
-	fn handle(&mut self) -> bool {
+
+	fn handle_irq(&mut self) -> bool {
 		// SAFE: Current impl avoids most races, but can misbehave (returnign bad data) if an IRQ happens between the inb calls
 		unsafe {
 			// NOTE: This matches qemu's behavior, but the wiki says it's chipset dependent
@@ -106,6 +106,7 @@ impl Ctrlr8042
 		// Read, Modify, Write the controller's config
 		ctrlr.write_cmd(0x20);
 		let mut config = ctrlr.read_data().ok().expect("Timeout reading PS/2 config");
+		// - Clear 0: Port1 Enable, 1: Port2 Enable, 6: Port1 Translation
 		config &= !( (1<<0)|(1<<1)|(1<<6) );
 		let can_have_second_port = config & (1<<5) != 0;
 		ctrlr.write_cmd(0x60);
@@ -168,14 +169,16 @@ impl Ctrlr8042
 		ctrlr.write_data(config);
 		// - Enable ports second
 		if port1_works {
+			let mut port = Port::new(false);
 			log_debug!("Enabling port 1");
-			ctrlr.port1 = Some( ::kernel::irqs::bind_object(1, Box::new(Port::new(false))) );
+			ctrlr.port1 = Some( ::kernel::irqs::bind_object(1, Box::new(move || port.handle_irq())) );
 			ctrlr.write_cmd(0xAE);
 			ctrlr.write_data(0xFF);
 		}
 		if port2_works {
+			let mut port = Port::new(true);
 			log_debug!("Enabling port 2");
-			ctrlr.port2 = Some( ::kernel::irqs::bind_object(12, Box::new(Port::new(true))) );
+			ctrlr.port2 = Some( ::kernel::irqs::bind_object(12, Box::new(move || port.handle_irq())) );
 			ctrlr.write_cmd(0xA8);
 			ctrlr.write_cmd(0xD4);
 			ctrlr.write_data(0xFF);

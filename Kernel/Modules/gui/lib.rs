@@ -13,12 +13,16 @@
 //!  - This allows the leader to switch to a lock screen
 //! - All windows are backed by a framebuffer in this code
 //!  - Kernel log is provided by a builtin text renderer
-#![feature(no_std,linkage,const_fn)]
-#![feature(core_str_ext,core_slice_ext)]
+#![feature(linkage)]
 #![no_std]
+
+//#![feature(plugin)]
+//#![plugin(tag_safe)]
 
 #[macro_use]
 extern crate kernel;
+extern crate key_codes;
+extern crate embedded_images;
 
 module_define!{GUI, [Video], init}
 
@@ -27,6 +31,7 @@ fn init()
 {
 	// - Enumerate display devices
 	::kernel::metadevs::video::register_geom_update(display_geom_update);
+	input::init();
 	// - Create kernel logging screen+window
 	windows::init();
 	kernel_log::init();
@@ -62,10 +67,15 @@ impl_fmt!{
 impl Colour
 {
 	pub fn def_black() -> Colour { Colour(0x00_00_00) }
+	pub fn def_gray () -> Colour { Colour(0xAA_AA_AA) }
 	pub fn def_white() -> Colour { Colour(0xFF_FF_FF) }
 	
-	pub fn def_yellow() -> Colour { Colour(0xFF_FF_00) }
+	pub fn def_blue () -> Colour { Colour(0x00_00_FF) }
 	pub fn def_green() -> Colour { Colour(0x00_FF_00) }
+	pub fn def_red  () -> Colour { Colour(0xFF_00_00) }
+
+	pub fn def_yellow() -> Colour { Colour(0xFF_FF_00) }
+	pub fn def_purple() -> Colour { Colour(0xFF_00_FF) }
 	
 	pub fn as_argb32(&self) -> u32 { self.0 }
 	pub fn from_argb32(v: u32) -> Self { Colour(v) }

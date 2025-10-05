@@ -3,16 +3,12 @@
 //
 // Core/threads/wait_queue.rs
 //! Thread wait queue
-use prelude::*;
 
 use super::thread::RunState;
 use super::ThreadList;
 
 use super::{get_cur_thread,rel_cur_thread,reschedule};
 use super::s_runnable_threads;
-
-#[doc(hidden)]
-pub const WAITQUEUE_INIT: WaitQueue = WaitQueue { list: super::THREADLIST_INIT };
 
 /// A list of waiting threads, can be woken one at a time, or all at once
 pub struct WaitQueue
@@ -23,16 +19,19 @@ pub struct WaitQueue
 impl WaitQueue
 {
 	pub const fn new() -> WaitQueue {
-		WAITQUEUE_INIT
+ 		WaitQueue {
+			list: super::THREADLIST_INIT
+			}
 	}
 	
 	#[doc(hidden)]
-	pub fn wait_int(&mut self) -> ::arch::sync::HeldInterrupts
+	//#[not_safe(irq,taskswitch)]
+	pub fn wait_int(&mut self) -> crate::arch::sync::HeldInterrupts
 	{
-		log_trace!("WaitQueue::wait(...)");
+		log_trace!("WaitQueue::wait({:p})", self);
 		
 		// - Prevent interrupts from firing while we mess with the thread
-		let irq_lock = ::arch::sync::hold_interrupts();
+		let irq_lock = crate::arch::sync::hold_interrupts();
 		
 		// 1. Lock global list?
 		let mut cur = get_cur_thread();
@@ -50,7 +49,7 @@ impl WaitQueue
 	/// ```
 	/// waitqueue_wait_ext!(lock_handle, queue);
 	/// ```
-	pub fn wait<'a,T:Send>(&mut self, lock_handle: ::arch::sync::HeldSpinlock<'a,T>)
+	pub fn wait<'a,T:Send>(&mut self, lock_handle: crate::arch::sync::HeldSpinlock<'a,T>)
 	{
 		let irq_lock = self.wait_int();
 		// 3. Unlock protector, and allow IRQs once more
@@ -65,24 +64,34 @@ impl WaitQueue
 		cur.assert_active();
 		rel_cur_thread(cur);
 	}
+
 	/// Returns true if there is a thread waiting on the list
-		pub fn has_waiter(&self) -> bool
-		{
-				! self.list.empty()
-		}
-	/// Wake a single thread waiting on this queue
-	pub fn wake_one(&mut self)
+	pub fn has_waiter(&self) -> bool
 	{
-		log_trace!("WaitQueue::wake_one()");
+		! self.list.empty()
+	}
+	/// Wake a single thread waiting on this queue
+	pub fn wake_one(&mut self) -> Option<super::ThreadID>
+	{
 		match self.list.pop()
 		{
 		Some(mut t) => {
+			let tid = t.get_tid();
+			log_trace!("WaitQueue::wake_one({:p}): Waking {}", self, tid);
 			t.set_state( RunState::Runnable );
-						let _irq_lock = ::arch::sync::hold_interrupts();
+			let _irq_lock = crate::arch::sync::hold_interrupts();
 			s_runnable_threads.lock().push(t);
+			Some(tid)
 			},
-		None => {}
+		None => None,
 		}
+	}
+}
+
+impl Default for WaitQueue
+{
+	fn default() -> WaitQueue {
+		WaitQueue::new()
 	}
 }
 

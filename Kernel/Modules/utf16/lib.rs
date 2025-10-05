@@ -3,9 +3,7 @@
 //
 // Modules/lib_utf16/lib.rs
 //! UTF-16 string support
-#![feature(no_std)]
 #![no_std]
-#![feature(core_slice_ext,core_str_ext,core_char_ext,iter_order)]
 #[macro_use] extern crate kernel;
 #[allow(unused_imports)]
 use kernel::prelude::*;
@@ -19,6 +17,78 @@ const HI_SURR_START: u16 = 0xD800;
 const HI_SURR_END  : u16 = 0xDBFF;
 const LO_SURR_START: u16 = 0xDC00;
 const LO_SURR_END  : u16 = 0xDFFF;
+
+/// Convert WTF-8 into UCS2/UTF-16
+pub fn wtf8_to_utf16(input: &[u8]) -> Wtf8ToUtf16<'_> {
+	Wtf8ToUtf16(input, None)
+}
+pub struct Wtf8ToUtf16<'a>(&'a [u8], Option<u16>);
+impl Wtf8ToUtf16<'_> {
+	fn pop_front(&mut self) -> Option<u8> {
+		match self.0.split_first()
+		{
+		None => None,
+		Some((&rv, next)) => { self.0 = next; Some(rv) }
+		}
+	}
+}
+impl ::core::iter::Iterator for Wtf8ToUtf16<'_> {
+	type Item = u16;
+	fn next(&mut self) -> Option<Self::Item> {
+		if let Some(rv) = self.1.take() {
+			return Some(rv);
+		}
+		Some(match self.pop_front()?
+		{
+		v @ 0 ..= 0x7F => v as u16,
+		b1 @ 0xC0 ..= 0xDF =>
+			match self.0
+			{
+			&[b2 @ 0x80 ..= 0xBF, ..] => {
+				self.pop_front();
+				// 5+6 bits = 11 total, fits in one unit
+				(b1 as u16 & 0x1F) << 6 | (b2 as u16 & 0x3F)
+				},
+			_ => b1 as u16,	// Invalid
+			},
+		b1 @ 0xE0 ..= 0xEF =>
+			match self.0
+			{
+			&[b2 @ 0x80 ..= 0xBF, b3 @ 0x80 ..= 0xBF, ..] => {
+				self.pop_front();
+				self.pop_front();
+				// 4+6+6 bits = 16 total, fits in one unit
+				(b1 as u16 & 0xF) << 12 | (b2 as u16 & 0x3F) << 6 | (b3 as u16 & 0x3F) << 0
+				},
+			_ => b1 as u16,	// Invalid
+			},
+		b1 @ 0xF0 ..= 0xF7 =>
+			match self.0
+			{
+			&[b2 @ 0x80 ..= 0xBF, b3 @ 0x80 ..= 0xBF, b4 @ 0x80 ..= 0xBF, ..] => {
+				self.pop_front();
+				self.pop_front();
+				self.pop_front();
+				// 3+6+6+6 bits = 21 bits total - requires splitting into two code units
+				let codepoint = (b1 as u32 & 0x7) << 18 | (b2 as u32 & 0x3F) << 12 | (b3 as u32 & 0x3F) << 6 | (b4 as u32 & 0x3F) << 0;
+				if codepoint < 0x1_0000 {
+					let codepoint_adj = codepoint - 0x1_0000;
+					let cu1 = HI_SURR_START + (codepoint_adj >> 10) as u16;
+					let cu2 = LO_SURR_START + (codepoint_adj & 0x3FF) as u16;
+					self.1 = Some(cu2);
+					cu1
+				}
+				else {
+					codepoint as u16
+				}
+				},
+			_ => b1 as u16,	// Invalid
+			},
+		//b @ 0x80 .. 0xC0 => v as u16,	// Ummatched UTF-8 surrogate!
+		v => v as u16,	// Invalid
+		})
+	}
+}
 
 impl Str16
 {
@@ -40,7 +110,7 @@ impl Str16
 					expect_low = true;
 				}
 				else if LO_SURR_START <= cu && cu <= LO_SURR_END {
-					// Unxpected low surrogate with no preceding high
+					// Unexpected low surrogate with no preceding high
 					return None;
 				}
 				else {
@@ -61,13 +131,13 @@ impl Str16
 	}
 	
 	/// Returns an iterator of unicode codepoints
-	pub fn chars<'a>(&'a self) -> Chars<'a> {
-		Chars(&self.0)
+	pub fn chars<'a>(&'a self) -> Chars< ::core::iter::Copied< ::core::slice::Iter<'a, u16> > > {
+		Chars(self.0.iter().copied())
 	}
 	/// An iterator that returns a series of WTF-8 codepoints (same encoding as
 	/// UTF-8, but invalid codepoints may be generated)
-	pub fn wtf8<'a>(&'a self) -> Wtf8<'a> {
-		Wtf8(self.chars(), [0; 4])
+	pub fn wtf8(&self) -> Wtf8<impl Iterator<Item=char> + '_> {
+		Wtf8::new(self.chars())
 	}
 }
 
@@ -84,7 +154,7 @@ impl_fmt! {
 			'"' => try!(write!(f, "\\\"")),
 			'\0' => try!(write!(f, "\\0")),
 			// ASCII printable characters
-			' '...'\u{127}' => try!(write!(f, "{}", c)),
+			' '..='\u{127}' => try!(write!(f, "{}", c)),
 			_ => try!(write!(f, "\\u{{{:x}}}", c as u32)),
 			}
 		}
@@ -131,8 +201,21 @@ impl cmp::PartialEq<str> for Str16
 	}
 }
 
-pub struct Wtf8<'a>(Chars<'a>, [u8; 4]);
-impl<'a> ::core::iter::Iterator for Wtf8<'a>
+/// "WTF"-8 encoding iterator
+///
+/// WTF-8 is UTF-8 that can contain unpaired surrogate codepoints.
+pub struct Wtf8<I>(I, [u8; 4]);
+impl<I> Wtf8<I>
+where
+	I: Iterator<Item=char>
+{
+	pub fn new(i: I) -> Self {
+		Wtf8(i, [0; 4])
+	}
+}
+impl<I> ::core::iter::Iterator for Wtf8<I>
+where
+	I: Iterator<Item=char>
 {
 	type Item = u8;
 	fn next(&mut self) -> Option<u8>
@@ -142,7 +225,7 @@ impl<'a> ::core::iter::Iterator for Wtf8<'a>
 			{
 			None => return None,
 			// no real need to check length. 4 is sufficient, and NUL termination is maintained
-			Some(c) => {c.encode_utf8(&mut self.1).unwrap();},
+			Some(c) => { c.encode_utf8(&mut self.1); },
 			}
 		}
 		let rv = self.1[0];
@@ -154,23 +237,26 @@ impl<'a> ::core::iter::Iterator for Wtf8<'a>
 	}
 }
 
-pub struct Chars<'a>(&'a [u16]);
-impl<'a> ::core::iter::Iterator for Chars<'a>
+/// Iterator over characters in a UTF-16 string
+pub struct Chars<I>(pub I);
+impl<I> ::core::iter::Iterator for Chars<I>
+where
+	I: ::core::iter::Iterator<Item=u16>
 {
 	type Item = char;
 	fn next(&mut self) -> Option<char>
 	{
-		let (cp,n) = match self.0.get(0).cloned()
+		let (cp,_n) = match self.0.next()
 			{
 			None => return None,
 			// High surrogate
-			Some(v @ HI_SURR_START ... HI_SURR_END) =>
-				match self.0.get(1).cloned()
+			Some(v @ HI_SURR_START ..= HI_SURR_END) =>
+				match self.0.next()
 				{
 				// - Surrogate pair
-				Some(low @ LO_SURR_START ... LO_SURR_END) => {
-					let high = v as u32 - 0xD800;
-					let low = low as u32 - 0xDC00;
+				Some(low @ LO_SURR_START ..= LO_SURR_END) => {
+					let high = (v - HI_SURR_START) as u32;
+					let low = (low - LO_SURR_START) as u32;
 					let cp: u32 = 0x10000 + high << 10 + low;
 					(cp, 2)
 					},
@@ -178,11 +264,10 @@ impl<'a> ::core::iter::Iterator for Chars<'a>
 				_ => (v as u32, 1),
 				},
 			// - Lone low surrogate, use semi-standard behavior
-			Some(v @ LO_SURR_START ... LO_SURR_END) => (v as u32, 1),
+			Some(v @ LO_SURR_START ..= LO_SURR_END) => (v as u32, 1),
 			// - Pure codepoint
 			Some(v) => (v as u32, 1),
 			};
-		self.0 = &self.0[n..];
 		Some(::core::char::from_u32(cp).expect("UTF-16 decode error"))
 	}
 }

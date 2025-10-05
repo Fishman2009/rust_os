@@ -7,24 +7,85 @@
 #[macro_use]
 extern crate syscalls;
 
-extern crate tifflin_process;
+extern crate loader;
 
 fn main()
 {
-	kernel_log!("Hello userland!");
+	let mut args = ::std::env::args_os();
+	args.next();
+	let root_app = args.next();
+	let root_app = match root_app {
+		Some(ref ra) => ra.to_str().unwrap(),
+		None => "/sysroot/bin/login",
+	};
+	let root_args = [];
+
+	kernel_log!("Tifflin (rust_os) userland started");
+
+	let rw_root: ::syscalls::vfs::Dir = get_handle("RW VFS Root", "RwRoot");
+	let net_mgmt = get_handle::<::syscalls::net::Management>("Network Manager", "NetMgmt");
 	
-	//let daemons = Vec::new();
+	let mut daemons = Vec::new();
+	daemons.push({
+		let path = "/sysroot/bin/daemon_network";
+		let pp = loader::new_process(open_exec(path), path.as_bytes(), &[])
+			.expect("Couldn't start network daemon");
+		pp.send_obj("NetMgmt", net_mgmt);
+		pp.start()
+	});
+
 	//let shells = Vec::new();
 
-	let session_root = tifflin_process::Process::spawn("/sysroot/bin/login");
+	let session_root = {
+		let pp = loader::new_process(open_exec(root_app), root_app.as_bytes(), &root_args)
+			.expect("Could not start root process");
 
-	let wingrp = syscalls::gui::Group::new("Session 1").unwrap();
-	wingrp.force_active().expect("Cannot force session 1 to be active");
-	session_root.send_obj(wingrp);
+		pp.send_obj("guigrp", {
+			let wingrp = syscalls::gui::Group::new("Session 1").unwrap();
+			wingrp.force_active().expect("Cannot force session 1 to be active");
+			wingrp
+			});
+		pp.send_obj("RwRoot", rw_root.clone() );
+		pp.start()
+		};
+	
+	let mut waits: Vec<_> = Iterator::chain(
+		::std::iter::once(&session_root),
+		daemons.iter()
+		).map(|v| v.wait_terminate())
+		.collect();
 	loop {
-		let mut waits = [session_root.wait_terminate()];
+		
 		::syscalls::threads::wait(&mut waits, !0);
+
+		drop(session_root);	// drop before panicking (leads to better reaping)
+		
+		// Empty wait set for ???
+		::syscalls::threads::wait(&mut [], !0);
+
 		panic!("TODO: Handle login terminating");
+	}
+}
+
+fn get_handle<T: ::syscalls::Object>(desc: &str, tag: &str) -> T
+{
+	match ::syscalls::threads::S_THIS_PROCESS.receive_object(tag)
+	{
+	Ok(v) => v,
+	Err(e) => panic!("Failed to receive {} - {:?}", desc, e),
+	}
+}
+
+fn open_exec(path: &str) -> ::syscalls::vfs::File
+{
+	match ::syscalls::vfs::root().open_child_path(path.as_bytes())
+	{
+	Ok(v) => match v.into_file(::syscalls::vfs::FileOpenMode::Execute)
+		{
+		Ok(v) => v,
+		Err(e) => panic!("Couldn't open '{}' as an executable file - {:?}", path, e),
+		},
+	Err(e) => panic!("Couldn't open executable '{}' - {:?}", path, e),
 	}
 }
 

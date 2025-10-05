@@ -4,15 +4,16 @@
 
 
 #include "armv7-helpers.S"
+#include "common.S"
 
 .extern main
 .extern register_arguments
 
 .section .text.start
 ENTRY(start)
-	b register_arguments
-	b main
+	bl register_arguments
+	bl main
 	
-	mov r12, #2
-	svc #2
+	mov r12, #CORE_EXIT
+	svc #CORE_EXIT
 

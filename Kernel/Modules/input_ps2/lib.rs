@@ -3,10 +3,8 @@
 //
 // Modules/input_ps2/lib.rs
 //! PS2 Keyboard/Mouse controller
-#![feature(no_std,linkage)]
+#![feature(linkage)]
 #![no_std]
-#![feature(core_slice_ext)]
-#![feature(const_fn)]	// needed for lazystatic_init
 
 #[macro_use]
 extern crate kernel;
@@ -17,10 +15,13 @@ extern crate gui;
 use kernel::prelude::*;
 
 // HACK: Requires USB to be active to ensure that emulation is off
-#[cfg(any(arch="amd64", arch="x86"))]
-module_define!{PS2, [DeviceManager, ACPI, GUI/*, USB*/], init}
-#[cfg(any(arch="armv7"))]
-module_define!{PS2, [DeviceManager, GUI/*, USB*/], init}
+module_define!{PS2, [
+	DeviceManager,
+	#[cfg(any(target_arch="x86",target_arch="x86_64"))]
+	ACPI,
+	GUI
+	/*, USB*/
+	], init}
 
 #[derive(Debug)]
 enum PS2Dev
@@ -45,17 +46,31 @@ enum EnumWaitState
 mod keyboard;
 mod mouse;
 
-#[cfg(any(arch="amd64", arch="x86"))]
+#[cfg(any(target_arch="x86",target_arch="x86_64"))]
 fn init()
 {
+	#[path="i8042.rs"]
 	mod i8042;
 	i8042::init();
 }
-#[cfg(any(arch="armv7"))]
+#[cfg(any(target_arch="arm",target_arch="aarch64"))]
 fn init()
 {
+	#[path="pl050.rs"]
 	mod pl050;
 	pl050::init();
+}
+#[cfg(any(target_arch="riscv64"))]
+fn init()
+{
+	// Is there a PS/2 controller
+	
+	// Minimal usage of the driver interfaces to prevent warnings
+	#[allow(dead_code)]
+	fn unused() {
+		let mut dev = PS2Dev::None;
+		dev.recv_byte(0);
+	}
 }
 
 impl PS2Dev
@@ -69,7 +84,7 @@ impl PS2Dev
 		(byte, Some(PS2Dev::Keyboard(dev)))
 	}
 	
-	/// Handle a recieved byte, and optionally return a byte to be sent to the device
+	/// Handle a received byte, and optionally return a byte to be sent to the device
 	pub fn recv_byte(&mut self, byte: u8) -> Option<u8> {
 		let (rv, new_state): (Option<_>,Option<_>) = match *self
 			{
@@ -94,7 +109,7 @@ impl PS2Dev
 						(Some(0xF2), Some(PS2Dev::Enumerating(EnumWaitState::IdentAck)))
 					}
 					else if byte == 0x00 {
-						// XXX: Ignore spurrious NUL byte
+						// XXX: Ignore spurious NUL byte
 						(None, None)
 					}
 					else {

@@ -1,0 +1,26 @@
+[package]
+name = "kernel"
+version = "0.0.0"
+edition = "2018"
+
+[lib]
+path = "main.rs"
+
+[features]
+acpica = [ "va_list", "dep:acpica-sys" ]
+test = [ "lazy_static" ]
+
+[dependencies]
+cfg-if = "0.1"
+lazy_static = { version = "1.4", optional = true }
+stack_dst = { version = "0.7.2", default-features = false, features = ["unsize"] }
+#tag_safe = "0.2"
+va_list = { version = "0.2", optional = true }
+embedded-images = { path = "../../Graphics/embedded" }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+uefi_proto = { path = "../../Bootloaders/uefi_proto" }
+acpica-sys = { path = "../../externals/acpica-sys", optional = true}
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(use_acpica)', 'cfg(test_shim)', 'cfg(_false)', 'cfg(false_)', 'cfg(in_ide)'] }
